@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
-from starlette.background import BackgroundTask  # <-- Note the different import here
+from starlette.background import BackgroundTask
 import subprocess
 import shutil
 import os
@@ -11,6 +11,11 @@ app = FastAPI()
 @app.get("/", response_class=HTMLResponse)
 def root():
     return "<h1>FastAPI pdf2htmlEX Service Online</h1><p>Send a POST request to <code>/convert</code> with a PDF file attachment.</p>"
+
+@app.get("/health")
+def health_check():
+    """Lightweight endpoint for GitHub Actions to keep the container awake."""
+    return {"status": "healthy", "service": "pdf_converter"}
 
 def cleanup_files(*paths: str):
     """Safely removes temporary files only after transmission completes."""
@@ -55,7 +60,7 @@ async def convert_pdf(file: UploadFile = File(...)):
             path=output_path, 
             media_type="text/html", 
             filename="converted.html",
-            background=BackgroundTask(cleanup_files, input_path, output_path)  # <-- Fixed lifecycle hook
+            background=BackgroundTask(cleanup_files, input_path, output_path)
         )
 
     except Exception as e:

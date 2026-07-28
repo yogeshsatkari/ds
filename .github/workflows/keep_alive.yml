@@ -1,0 +1,41 @@
+name: Keep FastAPI Awake (India Daytime Only)
+
+on:
+  schedule:
+    # Runs every 12 minutes, from 2:00 AM to 6:59 PM UTC
+    # Translates perfectly to ~7:30 AM through ~12:29 AM Indian Standard Time (IST)
+    - cron: '*/12 2-18 * * *'
+  workflow_dispatch: # Allows you to manually trigger it via the GitHub UI, plus there is a randomness of 0 to 30 seconds added to the 12 minutes
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Humanized Heartbeat Request
+        run: |
+          # 1. Randomize delivery down to the second (Human Jitter)
+          sleep $(( 1 + RANDOM % 30 ))
+          
+          # 2. Randomly select an authentic browser profile identity
+          UA_CHROME="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+          UA_EDGE="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0"
+          UA_FIREFOX="Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0"
+          
+          UA_ARRAY=("$UA_CHROME" "$UA_EDGE" "$UA_FIREFOX")
+          SELECTED_UA=${UA_ARRAY[$((RANDOM % 3))]}
+          
+          # 3. Create a unique query parameter tag
+          CACHE_BUST=$(date +%s%N)
+          
+          # 4. Fire the completely disguised browser network packet targeting your health endpoint
+          curl -s -o /dev/null -w "Traffic Result: %{http_code}\n" \
+               -A "$SELECTED_UA" \
+               -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8" \
+               -H "Accept-Language: en-US,en;q=0.9" \
+               -H "Cache-Control: no-cache" \
+               -H "Sec-Ch-Ua-Mobile: ?0" \
+               -H "Sec-Fetch-Dest: document" \
+               -H "Sec-Fetch-Mode: navigate" \
+               -H "Sec-Fetch-Site: none" \
+               -H "Upgrade-Insecure-Requests: 1" \
+               "https://onrender.com"
