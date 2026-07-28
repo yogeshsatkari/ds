@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Clone and compile pdf2htmlEX using its official installer scripts
-RUN git clone https://github.com /opt/pdf2htmlEX
+RUN git clone https://github.com/pdf2htmlEX/pdf2htmlEX.git
 WORKDIR /opt/pdf2htmlEX
 ENV UNATTENDED="-y"
 RUN buildScripts/getBuildToolsApt && buildScripts/buildInstallLocallyApt
