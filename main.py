@@ -1,11 +1,10 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 import subprocess
 import shutil
 import os
 import uuid
 import mimetypes
-from typing import Optional
 
 import boto3
 from botocore.config import Config
@@ -17,7 +16,6 @@ load_dotenv()
 app = FastAPI()
 
 R2_BUCKET = os.environ.get("R2_BUCKET")
-R2_ENDPOINT = os.environ.get("R2_ENDPOINT")
 
 
 def r2_configured() -> bool:
@@ -62,10 +60,11 @@ def upload_job_dir(client, job_id: str, job_dir: str) -> str:
     return f"{prefix}/index.html"
 
 
-def public_index_url(job_id: str) -> Optional[str]:
-    if not R2_ENDPOINT:
-        return None
-    return f"{R2_ENDPOINT}/{job_prefix(job_id)}/index.html"
+def build_view_url(job_id: str, request: Request) -> str:
+    base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+    if not base:
+        base = str(request.base_url).rstrip("/")
+    return f"{base}/view/{job_id}/index.html"
 
 
 def parse_job_id(job_id: str) -> str:
@@ -138,7 +137,7 @@ def view_job(job_id: str, asset_path: str):
 
 
 @app.post("/convert")
-async def convert_pdf(file: UploadFile = File(...)):
+async def convert_pdf(request: Request, file: UploadFile = File(...)):
     if not r2_configured():
         raise HTTPException(status_code=503, detail="Object storage is not configured.")
 
@@ -184,15 +183,13 @@ async def convert_pdf(file: UploadFile = File(...)):
             raise HTTPException(status_code=500, detail="pdf2htmlEX completed but generated no files.")
 
         client = r2_client()
-        index_key = upload_job_dir(client, job_id, job_dir)
+        upload_job_dir(client, job_id, job_dir)
 
         cleanup_job(input_path, job_dir)
 
         return {
             "job_id": job_id,
-            "index_key": index_key,
-            "view_url": f"/view/{job_id}/index.html",
-            "index_url": public_index_url(job_id),
+            "view_url": build_view_url(job_id, request),
         }
 
     except HTTPException:
