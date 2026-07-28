@@ -38,4 +38,4 @@ jobs:
                -H "Sec-Fetch-Mode: navigate" \
                -H "Sec-Fetch-Site: none" \
                -H "Upgrade-Insecure-Requests: 1" \
-               "https://onrender.com"
+               "https://ds-x5ai.onrender.com/health"
