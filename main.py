@@ -1,5 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
+from starlette.background import BackgroundTask  # <-- Note the different import here
 import subprocess
 import shutil
 import os
@@ -10,6 +11,15 @@ app = FastAPI()
 @app.get("/", response_class=HTMLResponse)
 def root():
     return "<h1>FastAPI pdf2htmlEX Service Online</h1><p>Send a POST request to <code>/convert</code> with a PDF file attachment.</p>"
+
+def cleanup_files(*paths: str):
+    """Safely removes temporary files only after transmission completes."""
+    for path in paths:
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
 
 @app.post("/convert")
 async def convert_pdf(file: UploadFile = File(...)):
@@ -32,14 +42,22 @@ async def convert_pdf(file: UploadFile = File(...)):
         result = subprocess.run(command, capture_output=True, text=True)
 
         if result.returncode != 0:
+            cleanup_files(input_path, output_path)
             raise HTTPException(status_code=500, detail=f"Conversion processing fault: {result.stderr}")
 
-        # Stream generated output page to user client, deleting tracking records after transmission
-        return FileResponse(path=output_path, media_type="text/html", filename=f"converted.html")
+        # Check if the tool actually generated an output file and it has content
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            cleanup_files(input_path, output_path)
+            raise HTTPException(status_code=500, detail="pdf2htmlEX completed but produced an empty file.")
 
-    finally:
-        # File management system teardown routines
-        if os.path.exists(input_path):
-            os.remove(input_path)
-        if os.path.exists(output_path):
-            os.remove(output_path)
+        # Stream generated output page to user client, deleting tracking records strictly AFTER transmission
+        return FileResponse(
+            path=output_path, 
+            media_type="text/html", 
+            filename="converted.html",
+            background=BackgroundTask(cleanup_files, input_path, output_path)  # <-- Fixed lifecycle hook
+        )
+
+    except Exception as e:
+        cleanup_files(input_path, output_path)
+        raise HTTPException(status_code=500, detail=str(e))
