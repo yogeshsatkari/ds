@@ -3,3 +3,5 @@ venv
 *.pdf
 *.html
 .env
+*.zip
+converted_result
