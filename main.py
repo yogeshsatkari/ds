@@ -6,6 +6,9 @@ import os
 import uuid
 import mimetypes
 import asyncio
+import time
+import random
+import threading
 
 import boto3
 from botocore.config import Config
@@ -210,4 +213,75 @@ async def delayed_response():
     return {
         "status": "success",
         "message": f"Responded successfully after {i} seconds."
+    }
+
+
+
+@app.get("/simulate-ai")
+async def simulate_ai(
+    pages: int = 20,
+    min_delay: float = 6.0,
+    max_delay: float = 10.0,
+    cpu_iterations: int = 500_000,
+    upload_delay: float = 0.2,
+):
+    """
+    Simulates an AI extraction endpoint.
+
+    Example:
+    /simulate-ai
+
+    /simulate-ai?pages=20
+
+    /simulate-ai?pages=30&min_delay=5&max_delay=8
+
+    /simulate-ai?pages=20&cpu_iterations=1000000
+    """
+
+    request_start = time.perf_counter()
+
+    page_results = []
+
+    for page in range(1, pages + 1):
+
+        page_start = time.perf_counter()
+
+        # -----------------------------
+        # Simulate Gemini API latency
+        # -----------------------------
+        gemini_wait = random.uniform(min_delay, max_delay)
+        await asyncio.sleep(gemini_wait)
+
+        # -----------------------------
+        # Simulate processing response
+        # -----------------------------
+        total = 0
+        for i in range(cpu_iterations):
+            total += i
+
+        # -----------------------------
+        # Simulate upload to R2 / DB
+        # -----------------------------
+        await asyncio.sleep(upload_delay)
+
+        page_results.append({
+            "page": page,
+            "gemini_wait_seconds": round(gemini_wait, 2),
+            "page_time_seconds": round(
+                time.perf_counter() - page_start, 2
+            ),
+        })
+
+    total_time = round(time.perf_counter() - request_start, 2)
+
+    return {
+        "status": "completed",
+        "pages_processed": pages,
+        "total_request_time_seconds": total_time,
+        "server": {
+            "pid": os.getpid(),
+            "cpu_count": os.cpu_count(),
+            "active_threads": threading.active_count(),
+        },
+        "page_results": page_results,
     }
