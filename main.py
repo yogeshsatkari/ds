@@ -203,12 +203,11 @@ async def convert_pdf(request: Request, file: UploadFile = File(...)):
 @app.get("/delayed-response")
 async def delayed_response():
     # 1.20 minutes converts to exactly 80 seconds
-    delay_seconds = 80  
-    
-    # Non-blocking pause that allows the server to handle other traffic
-    await asyncio.sleep(delay_seconds)
-    
+    # add some load on server
+    for i in range(100000000):
+        x = i * i
+        print(f"Processing {i}...")
     return {
         "status": "success",
-        "message": f"Responded successfully after {delay_seconds} seconds."
+        "message": f"Responded successfully after {i} seconds."
     }
