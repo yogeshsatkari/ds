@@ -1,85 +1,110 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 import subprocess
 import shutil
 import os
 import uuid
 import mimetypes
+from typing import Optional
 
-import boto3
-from botocore.config import Config
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
+
+import gemini_service
+import r2_storage
 
 load_dotenv()
 
 app = FastAPI()
 
-R2_BUCKET = os.environ.get("R2_BUCKET")
+
+def parse_uuid(value: str, field_name: str) -> str:
+    try:
+        return str(uuid.UUID(value))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid {field_name}.") from exc
 
 
-def r2_configured() -> bool:
-    return bool(
-        os.environ.get("R2_BUCKET")
-        and os.environ.get("R2_ENDPOINT")
-        and os.environ.get("ACCESS_KEY_ID")
-        and os.environ.get("SECRET_ACCESS_KEY")
-    )
-
-
-def r2_client():
-    return boto3.client(
-        "s3",
-        endpoint_url=os.environ["R2_ENDPOINT"],
-        aws_access_key_id=os.environ["ACCESS_KEY_ID"],
-        aws_secret_access_key=os.environ["SECRET_ACCESS_KEY"],
-        region_name="auto",
-        config=Config(signature_version="s3v4"),
-    )
-
-
-def job_prefix(job_id: str) -> str:
-    return f"jobs/{job_id}"
-
-
-def upload_job_dir(client, job_id: str, job_dir: str) -> str:
-    prefix = job_prefix(job_id)
-    for root, _, files in os.walk(job_dir):
-        for name in files:
-            local_path = os.path.join(root, name)
-            rel = os.path.relpath(local_path, job_dir).replace("\\", "/")
-            key = f"{prefix}/{rel}"
-            extra: dict = {}
-            content_type, _ = mimetypes.guess_type(local_path)
-            if content_type:
-                extra["ContentType"] = content_type
-            if extra:
-                client.upload_file(local_path, R2_BUCKET, key, ExtraArgs=extra)
-            else:
-                client.upload_file(local_path, R2_BUCKET, key)
-    return f"{prefix}/index.html"
-
-
-def build_view_url(job_id: str, request: Request) -> str:
+def public_url(request: Request, path: str) -> str:
     base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
     if not base:
         base = str(request.base_url).rstrip("/")
-    return f"{base}/view/{job_id}/index.html"
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"{base}{path}"
 
 
-def parse_job_id(job_id: str) -> str:
+def require_r2() -> None:
+    if not r2_storage.r2_configured():
+        raise HTTPException(status_code=503, detail="Object storage is not configured.")
+
+
+def require_gemini() -> None:
+    if not gemini_service.gemini_configured():
+        raise HTTPException(status_code=503, detail="Gemini is not configured.")
+
+
+def cleanup_paths(*paths: str) -> None:
+    for path in paths:
+        if not path or not os.path.exists(path):
+            continue
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+        except OSError:
+            pass
+
+
+def convert_pdf_to_html(input_path: str, output_dir: str) -> None:
+    os.makedirs(output_dir, exist_ok=True)
+    command = [
+        "pdf2htmlEX",
+        "--zoom",
+        "1.3",
+        "--embed-css",
+        "0",
+        "--embed-font",
+        "0",
+        "--embed-image",
+        "0",
+        "--embed-javascript",
+        "0",
+        "--dest-dir",
+        output_dir,
+        input_path,
+        "index.html",
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise HTTPException(status_code=500, detail=f"Conversion processing fault: {result.stderr}")
+    if not os.listdir(output_dir):
+        raise HTTPException(status_code=500, detail="pdf2htmlEX completed but generated no files.")
+
+
+def r2_response(client, key: str, asset_path: str) -> Response:
     try:
-        return str(uuid.UUID(job_id))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="Invalid job_id.") from exc
+        body, content_type = r2_storage.get_bytes(client, key)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Asset not found.") from exc
+    except ClientError as exc:
+        raise HTTPException(status_code=502, detail="Failed to load asset from storage.") from exc
+
+    media_type = content_type or mimetypes.guess_type(asset_path)[0] or "application/octet-stream"
+    return Response(content=body, media_type=media_type)
 
 
 @app.get("/", response_class=HTMLResponse)
 def root():
     return (
-        "<h1>FastAPI pdf2htmlEX Service Online</h1>"
-        "<p>Send a POST request to <code>/convert</code> with a PDF file attachment.</p>"
-        "<p>View a conversion at <code>/view/{job_id}</code>.</p>"
+        "<h1>Discharge Summary API</h1>"
+        "<ul>"
+        "<li><code>POST /templates</code> — upload template PDF</li>"
+        "<li><code>POST /extract</code> — upload images, extract clinical context</li>"
+        "<li><code>POST /summarize</code> — generate discharge summary HTML</li>"
+        "<li><code>POST /convert</code> — legacy PDF to HTML demo</li>"
+        "</ul>"
     )
 
 
@@ -87,59 +112,210 @@ def root():
 def health_check():
     return {
         "status": "healthy",
-        "service": "pdf_converter",
-        "r2_configured": r2_configured(),
+        "service": "discharge_summary_api",
+        "r2_configured": r2_storage.r2_configured(),
+        "gemini_configured": gemini_service.gemini_configured(),
     }
 
 
-def cleanup_job(input_path: str, job_dir: str):
-    if os.path.exists(input_path):
-        try:
-            os.remove(input_path)
-        except OSError:
-            pass
+@app.get("/view/template/{template_id}")
+def view_template_redirect(template_id: str):
+    template_id = parse_uuid(template_id, "template_id")
+    return RedirectResponse(url=f"/view/template/{template_id}/index.html", status_code=307)
 
-    if os.path.exists(job_dir):
-        try:
-            shutil.rmtree(job_dir)
-        except OSError:
-            pass
+
+@app.get("/view/template/{template_id}/{asset_path:path}")
+def view_template(template_id: str, asset_path: str):
+    require_r2()
+    template_id = parse_uuid(template_id, "template_id")
+    if ".." in asset_path or asset_path.startswith(("/", "\\")):
+        raise HTTPException(status_code=400, detail="Invalid asset path.")
+
+    client = r2_storage.r2_client()
+    try:
+        key = r2_storage.resolve_template_asset_key(client, template_id, asset_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Template not found.") from exc
+
+    return r2_response(client, key, asset_path)
+
+
+@app.get("/view/summary/{summary_id}")
+def view_summary_redirect(summary_id: str):
+    summary_id = parse_uuid(summary_id, "summary_id")
+    return RedirectResponse(url=f"/view/summary/{summary_id}/index.html", status_code=307)
+
+
+@app.get("/view/summary/{summary_id}/{asset_path:path}")
+def view_summary(summary_id: str, asset_path: str):
+    require_r2()
+    summary_id = parse_uuid(summary_id, "summary_id")
+    if asset_path not in ("index.html", "filled.html"):
+        raise HTTPException(status_code=404, detail="Asset not found.")
+
+    client = r2_storage.r2_client()
+    try:
+        key = r2_storage.resolve_summary_html_key(client, summary_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Summary not found.") from exc
+
+    return r2_response(client, key, "filled.html")
 
 
 @app.get("/view/{job_id}")
-def view_job_redirect(job_id: str):
-    job_id = parse_job_id(job_id)
+def view_legacy_job_redirect(job_id: str):
+    job_id = parse_uuid(job_id, "job_id")
     return RedirectResponse(url=f"/view/{job_id}/index.html", status_code=307)
 
 
 @app.get("/view/{job_id}/{asset_path:path}")
-def view_job(job_id: str, asset_path: str):
-    if not r2_configured():
-        raise HTTPException(status_code=503, detail="Object storage is not configured.")
-
-    job_id = parse_job_id(job_id)
+def view_legacy_job(job_id: str, asset_path: str):
+    require_r2()
+    job_id = parse_uuid(job_id, "job_id")
     if ".." in asset_path or asset_path.startswith(("/", "\\")):
         raise HTTPException(status_code=400, detail="Invalid asset path.")
 
-    key = f"{job_prefix(job_id)}/{asset_path}"
-    client = r2_client()
-    try:
-        obj = client.get_object(Bucket=R2_BUCKET, Key=key)
-    except ClientError as exc:
-        code = exc.response.get("Error", {}).get("Code", "")
-        if code in ("NoSuchKey", "404"):
-            raise HTTPException(status_code=404, detail="Asset not found.") from exc
-        raise HTTPException(status_code=502, detail="Failed to load asset from storage.") from exc
+    key = f"{r2_storage.legacy_job_prefix(job_id)}/{asset_path}"
+    return r2_response(r2_storage.r2_client(), key, asset_path)
 
-    body = obj["Body"].read()
-    content_type = obj.get("ContentType") or mimetypes.guess_type(asset_path)[0] or "application/octet-stream"
-    return Response(content=body, media_type=content_type)
+
+@app.post("/templates")
+async def upload_template(
+    request: Request,
+    user_id: str = Form(...),
+    file: UploadFile = File(...),
+):
+    require_r2()
+    user_id = parse_uuid(user_id, "user_id")
+
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Template must be a PDF file.")
+
+    template_id = str(uuid.uuid4())
+    input_path = f"tmp_template_{template_id}.pdf"
+    job_dir = f"dir_template_{template_id}"
+
+    try:
+        with open(input_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        convert_pdf_to_html(input_path, job_dir)
+
+        client = r2_storage.r2_client()
+        html_prefix = r2_storage.template_html_prefix(user_id, template_id)
+        r2_storage.upload_dir(client, html_prefix, job_dir)
+        r2_storage.save_template_ref(client, template_id, user_id)
+
+        return {
+            "template_id": template_id,
+            "view_url": public_url(request, f"/view/template/{template_id}/index.html"),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        cleanup_paths(input_path, job_dir)
+
+
+@app.post("/extract")
+async def extract_images(
+    user_id: str = Form(...),
+    files: list[UploadFile] = File(...),
+    patient_id: Optional[str] = Form(None),
+):
+    require_r2()
+    require_gemini()
+    user_id = parse_uuid(user_id, "user_id")
+
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one image is required.")
+
+    if patient_id:
+        patient_id = parse_uuid(patient_id, "patient_id")
+    else:
+        patient_id = str(uuid.uuid4())
+
+    extraction_id = str(uuid.uuid4())
+    image_items: list[tuple[str, bytes]] = []
+
+    try:
+        for index, upload in enumerate(files, start=1):
+            filename = upload.filename or f"page-{index:03d}.jpg"
+            gemini_service.validate_image_filename(filename)
+            content = await upload.read()
+            if not content:
+                raise HTTPException(status_code=400, detail=f"Empty image file: {filename}")
+            image_items.append((filename, content))
+
+        consolidated_context = gemini_service.run_extraction(image_items)
+
+        client = r2_storage.r2_client()
+        context_key = r2_storage.extraction_key(user_id, patient_id, extraction_id)
+        r2_storage.put_text(client, context_key, consolidated_context, "text/markdown; charset=utf-8")
+
+        return {
+            "patient_id": patient_id,
+            "extraction_id": extraction_id,
+        }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/summarize")
+async def summarize_discharge(
+    request: Request,
+    user_id: str = Form(...),
+    patient_id: str = Form(...),
+    extraction_id: str = Form(...),
+    template_id: str = Form(...),
+):
+    require_r2()
+    require_gemini()
+
+    user_id = parse_uuid(user_id, "user_id")
+    patient_id = parse_uuid(patient_id, "patient_id")
+    extraction_id = parse_uuid(extraction_id, "extraction_id")
+    template_id = parse_uuid(template_id, "template_id")
+
+    summary_id = str(uuid.uuid4())
+    client = r2_storage.r2_client()
+
+    try:
+        template_ref = r2_storage.get_json(client, r2_storage.template_ref_key(template_id))
+        if template_ref.get("user_id") != user_id:
+            raise HTTPException(status_code=404, detail="Template not found for this user.")
+
+        context_key = r2_storage.extraction_key(user_id, patient_id, extraction_id)
+        template_html_key = f"{template_ref['html_prefix']}/index.html"
+
+        clinical_context = r2_storage.get_text(client, context_key)
+        template_html = r2_storage.get_text(client, template_html_key)
+        filled_html = gemini_service.generate_discharge_summary(clinical_context, template_html)
+
+        html_key = r2_storage.summary_html_key(user_id, patient_id, summary_id)
+        r2_storage.put_text(client, html_key, filled_html, "text/html; charset=utf-8")
+        r2_storage.save_summary_ref(client, summary_id, user_id, patient_id, html_key)
+
+        return {
+            "summary_id": summary_id,
+            "view_url": public_url(request, f"/view/summary/{summary_id}/index.html"),
+        }
+    except HTTPException:
+        raise
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Extraction or template not found.") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/convert")
 async def convert_pdf(request: Request, file: UploadFile = File(...)):
-    if not r2_configured():
-        raise HTTPException(status_code=503, detail="Object storage is not configured.")
+    require_r2()
 
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Uploaded document must be a PDF format profile.")
@@ -152,48 +328,18 @@ async def convert_pdf(request: Request, file: UploadFile = File(...)):
         with open(input_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        os.makedirs(job_dir, exist_ok=True)
+        convert_pdf_to_html(input_path, job_dir)
 
-        command = [
-            "pdf2htmlEX",
-            "--zoom",
-            "1.3",
-            "--embed-css",
-            "0",
-            "--embed-font",
-            "0",
-            "--embed-image",
-            "0",
-            "--embed-javascript",
-            "0",
-            "--dest-dir",
-            job_dir,
-            input_path,
-            "index.html",
-        ]
-
-        result = subprocess.run(command, capture_output=True, text=True)
-
-        if result.returncode != 0:
-            cleanup_job(input_path, job_dir)
-            raise HTTPException(status_code=500, detail=f"Conversion processing fault: {result.stderr}")
-
-        if not os.listdir(job_dir):
-            cleanup_job(input_path, job_dir)
-            raise HTTPException(status_code=500, detail="pdf2htmlEX completed but generated no files.")
-
-        client = r2_client()
-        upload_job_dir(client, job_id, job_dir)
-
-        cleanup_job(input_path, job_dir)
+        client = r2_storage.r2_client()
+        r2_storage.upload_dir(client, r2_storage.legacy_job_prefix(job_id), job_dir)
 
         return {
             "job_id": job_id,
-            "view_url": build_view_url(job_id, request),
+            "view_url": public_url(request, f"/view/{job_id}/index.html"),
         }
-
     except HTTPException:
         raise
-    except Exception as e:
-        cleanup_job(input_path, job_dir)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        cleanup_paths(input_path, job_dir)

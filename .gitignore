@@ -5,3 +5,4 @@ venv
 .env
 *.zip
 converted_result
+__pycache__
