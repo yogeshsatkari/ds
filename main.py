@@ -217,33 +217,24 @@ async def delayed_response():
 
 
 
+
 @app.get("/simulate-ai")
 async def simulate_ai(
+    response: Response,
     pages: int = 20,
     min_delay: float = 6.0,
     max_delay: float = 10.0,
     cpu_iterations: int = 500_000,
     upload_delay: float = 0.2,
 ):
-    """
-    Simulates an AI extraction endpoint.
-
-    Example:
-    /simulate-ai
-
-    /simulate-ai?pages=20
-
-    /simulate-ai?pages=30&min_delay=5&max_delay=8
-
-    /simulate-ai?pages=20&cpu_iterations=1000000
-    """
-
+    """Simulates an AI extraction endpoint using native Python tracking tools."""
     request_start = time.perf_counter()
 
+    # Track thread concurrency thresholds
+    peak_active_threads = 0
     page_results = []
 
     for page in range(1, pages + 1):
-
         page_start = time.perf_counter()
 
         # -----------------------------
@@ -259,6 +250,10 @@ async def simulate_ai(
         for i in range(cpu_iterations):
             total += i
 
+        # Audit thread pool size right during intensive processing blocks
+        current_threads = threading.active_count()
+        peak_active_threads = max(peak_active_threads, current_threads)
+
         # -----------------------------
         # Simulate upload to R2 / DB
         # -----------------------------
@@ -267,12 +262,13 @@ async def simulate_ai(
         page_results.append({
             "page": page,
             "gemini_wait_seconds": round(gemini_wait, 2),
-            "page_time_seconds": round(
-                time.perf_counter() - page_start, 2
-            ),
+            "page_time_seconds": round(time.perf_counter() - page_start, 2),
         })
 
     total_time = round(time.perf_counter() - request_start, 2)
+
+    # Inject peak threads into headers for the VS Code terminal to read
+    response.headers["X-Peak-Active-Threads"] = str(peak_active_threads)
 
     return {
         "status": "completed",
@@ -281,7 +277,8 @@ async def simulate_ai(
         "server": {
             "pid": os.getpid(),
             "cpu_count": os.cpu_count(),
-            "active_threads": threading.active_count(),
+            "active_threads_at_completion": threading.active_count(),
+            "peak_concurrent_threads_observed": peak_active_threads,
         },
         "page_results": page_results,
     }
