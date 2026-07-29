@@ -5,6 +5,7 @@ import shutil
 import os
 import uuid
 import mimetypes
+import asyncio
 
 import boto3
 from botocore.config import Config
@@ -197,3 +198,17 @@ async def convert_pdf(request: Request, file: UploadFile = File(...)):
     except Exception as e:
         cleanup_job(input_path, job_dir)
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/delayed-response")
+async def delayed_response():
+    # 1.20 minutes converts to exactly 80 seconds
+    delay_seconds = 80  
+    
+    # Non-blocking pause that allows the server to handle other traffic
+    await asyncio.sleep(delay_seconds)
+    
+    return {
+        "status": "success",
+        "message": f"Responded successfully after {delay_seconds} seconds."
+    }
