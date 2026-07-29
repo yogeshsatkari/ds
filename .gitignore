@@ -6,3 +6,5 @@ venv
 *.zip
 converted_result
 __pycache__
+__pycache__/*
+*.pyc
