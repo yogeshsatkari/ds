@@ -1,4 +1,3 @@
-import json
 import mimetypes
 import os
 from typing import Optional
@@ -32,24 +31,24 @@ def bucket() -> str:
     return os.environ["R2_BUCKET"]
 
 
-def template_html_prefix(user_id: str, template_id: str) -> str:
-    return f"users/{user_id}/templates/{template_id}/html"
+def template_prefix(user_id: str, template_id: str) -> str:
+    return f"users/{user_id}/templates/{template_id}"
+
+
+def template_asset_key(user_id: str, template_id: str, asset_path: str) -> str:
+    return f"{template_prefix(user_id, template_id)}/{asset_path}"
 
 
 def extraction_key(user_id: str, patient_id: str, extraction_id: str) -> str:
     return f"users/{user_id}/patients/{patient_id}/extractions/{extraction_id}.md"
 
 
-def summary_html_key(user_id: str, patient_id: str, summary_id: str) -> str:
-    return f"users/{user_id}/patients/{patient_id}/summaries/{summary_id}/filled.html"
+def summary_prefix(user_id: str, patient_id: str, summary_id: str) -> str:
+    return f"users/{user_id}/patients/{patient_id}/summaries/{summary_id}"
 
 
-def template_ref_key(template_id: str) -> str:
-    return f"refs/templates/{template_id}.json"
-
-
-def summary_ref_key(summary_id: str) -> str:
-    return f"refs/summaries/{summary_id}.json"
+def summary_asset_key(user_id: str, patient_id: str, summary_id: str, asset_path: str) -> str:
+    return f"{summary_prefix(user_id, patient_id, summary_id)}/{asset_path}"
 
 
 def legacy_job_prefix(job_id: str) -> str:
@@ -81,10 +80,6 @@ def put_text(client, key: str, text: str, content_type: str = "text/plain; chars
     )
 
 
-def put_json(client, key: str, data: dict) -> None:
-    put_text(client, key, json.dumps(data), "application/json")
-
-
 def get_text(client, key: str) -> str:
     try:
         obj = client.get_object(Bucket=bucket(), Key=key)
@@ -94,10 +89,6 @@ def get_text(client, key: str) -> str:
             raise FileNotFoundError(key) from exc
         raise
     return obj["Body"].read().decode("utf-8")
-
-
-def get_json(client, key: str) -> dict:
-    return json.loads(get_text(client, key))
 
 
 def get_bytes(client, key: str) -> tuple[bytes, Optional[str]]:
@@ -112,42 +103,32 @@ def get_bytes(client, key: str) -> tuple[bytes, Optional[str]]:
     return obj["Body"].read(), content_type
 
 
-def save_template_ref(client, template_id: str, user_id: str) -> None:
-    put_json(
-        client,
-        template_ref_key(template_id),
-        {
-            "template_id": template_id,
-            "user_id": user_id,
-            "html_prefix": template_html_prefix(user_id, template_id),
-        },
-    )
-
-
-def save_summary_ref(
+def copy_prefix(
     client,
-    summary_id: str,
-    user_id: str,
-    patient_id: str,
-    html_key: str,
-) -> None:
-    put_json(
-        client,
-        summary_ref_key(summary_id),
-        {
-            "summary_id": summary_id,
-            "user_id": user_id,
-            "patient_id": patient_id,
-            "html_key": html_key,
-        },
-    )
+    source_prefix: str,
+    dest_prefix: str,
+    *,
+    exclude_names: set[str] | None = None,
+) -> int:
+    exclude_names = exclude_names or set()
+    source_prefix = source_prefix.rstrip("/") + "/"
+    dest_prefix = dest_prefix.rstrip("/") + "/"
+    copied = 0
 
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket(), Prefix=source_prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            rel = key[len(source_prefix) :]
+            if not rel or rel.endswith("/"):
+                continue
+            if rel.split("/")[-1] in exclude_names:
+                continue
+            client.copy_object(
+                Bucket=bucket(),
+                CopySource={"Bucket": bucket(), "Key": key},
+                Key=f"{dest_prefix}{rel}",
+            )
+            copied += 1
 
-def resolve_template_asset_key(client, template_id: str, asset_path: str) -> str:
-    ref = get_json(client, template_ref_key(template_id))
-    return f"{ref['html_prefix']}/{asset_path}"
-
-
-def resolve_summary_html_key(client, summary_id: str) -> str:
-    ref = get_json(client, summary_ref_key(summary_id))
-    return ref["html_key"]
+    return copied

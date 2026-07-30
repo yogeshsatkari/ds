@@ -118,57 +118,59 @@ def health_check():
     }
 
 
-@app.get("/view/template/{template_id}")
-def view_template_redirect(template_id: str):
+@app.get("/view/{user_id}/template/{template_id}")
+def view_template_redirect(user_id: str, template_id: str):
+    user_id = parse_uuid(user_id, "user_id")
     template_id = parse_uuid(template_id, "template_id")
-    return RedirectResponse(url=f"/view/template/{template_id}/index.html", status_code=307)
+    return RedirectResponse(
+        url=f"/view/{user_id}/template/{template_id}/index.html",
+        status_code=307,
+    )
 
 
-@app.get("/view/template/{template_id}/{asset_path:path}")
-def view_template(template_id: str, asset_path: str):
+@app.get("/view/{user_id}/template/{template_id}/{asset_path:path}")
+def view_template(user_id: str, template_id: str, asset_path: str):
     require_r2()
+    user_id = parse_uuid(user_id, "user_id")
     template_id = parse_uuid(template_id, "template_id")
     if ".." in asset_path or asset_path.startswith(("/", "\\")):
         raise HTTPException(status_code=400, detail="Invalid asset path.")
 
-    client = r2_storage.r2_client()
-    try:
-        key = r2_storage.resolve_template_asset_key(client, template_id, asset_path)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Template not found.") from exc
-
-    return r2_response(client, key, asset_path)
+    key = r2_storage.template_asset_key(user_id, template_id, asset_path)
+    return r2_response(r2_storage.r2_client(), key, asset_path)
 
 
-@app.get("/view/summary/{summary_id}")
-def view_summary_redirect(summary_id: str):
+@app.get("/view/{user_id}/summary/{patient_id}/{summary_id}")
+def view_summary_redirect(user_id: str, patient_id: str, summary_id: str):
+    user_id = parse_uuid(user_id, "user_id")
+    patient_id = parse_uuid(patient_id, "patient_id")
     summary_id = parse_uuid(summary_id, "summary_id")
-    return RedirectResponse(url=f"/view/summary/{summary_id}/index.html", status_code=307)
+    return RedirectResponse(
+        url=f"/view/{user_id}/summary/{patient_id}/{summary_id}/index.html",
+        status_code=307,
+    )
 
 
-@app.get("/view/summary/{summary_id}/{asset_path:path}")
-def view_summary(summary_id: str, asset_path: str):
+@app.get("/view/{user_id}/summary/{patient_id}/{summary_id}/{asset_path:path}")
+def view_summary(user_id: str, patient_id: str, summary_id: str, asset_path: str):
     require_r2()
+    user_id = parse_uuid(user_id, "user_id")
+    patient_id = parse_uuid(patient_id, "patient_id")
     summary_id = parse_uuid(summary_id, "summary_id")
-    if asset_path not in ("index.html", "filled.html"):
-        raise HTTPException(status_code=404, detail="Asset not found.")
+    if ".." in asset_path or asset_path.startswith(("/", "\\")):
+        raise HTTPException(status_code=400, detail="Invalid asset path.")
 
-    client = r2_storage.r2_client()
-    try:
-        key = r2_storage.resolve_summary_html_key(client, summary_id)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Summary not found.") from exc
-
-    return r2_response(client, key, "filled.html")
+    key = r2_storage.summary_asset_key(user_id, patient_id, summary_id, asset_path)
+    return r2_response(r2_storage.r2_client(), key, asset_path)
 
 
-@app.get("/view/{job_id}")
+@app.get("/view/legacy/{job_id}")
 def view_legacy_job_redirect(job_id: str):
     job_id = parse_uuid(job_id, "job_id")
-    return RedirectResponse(url=f"/view/{job_id}/index.html", status_code=307)
+    return RedirectResponse(url=f"/view/legacy/{job_id}/index.html", status_code=307)
 
 
-@app.get("/view/{job_id}/{asset_path:path}")
+@app.get("/view/legacy/{job_id}/{asset_path:path}")
 def view_legacy_job(job_id: str, asset_path: str):
     require_r2()
     job_id = parse_uuid(job_id, "job_id")
@@ -202,13 +204,15 @@ async def upload_template(
         convert_pdf_to_html(input_path, job_dir)
 
         client = r2_storage.r2_client()
-        html_prefix = r2_storage.template_html_prefix(user_id, template_id)
-        r2_storage.upload_dir(client, html_prefix, job_dir)
-        r2_storage.save_template_ref(client, template_id, user_id)
+        template_prefix = r2_storage.template_prefix(user_id, template_id)
+        r2_storage.upload_dir(client, template_prefix, job_dir)
 
         return {
             "template_id": template_id,
-            "view_url": public_url(request, f"/view/template/{template_id}/index.html"),
+            "view_url": public_url(
+                request,
+                f"/view/{user_id}/template/{template_id}/index.html",
+            ),
         }
     except HTTPException:
         raise
@@ -286,24 +290,35 @@ async def summarize_discharge(
     client = r2_storage.r2_client()
 
     try:
-        template_ref = r2_storage.get_json(client, r2_storage.template_ref_key(template_id))
-        if template_ref.get("user_id") != user_id:
-            raise HTTPException(status_code=404, detail="Template not found for this user.")
-
         context_key = r2_storage.extraction_key(user_id, patient_id, extraction_id)
-        template_html_key = f"{template_ref['html_prefix']}/index.html"
+        template_html_key = r2_storage.template_asset_key(user_id, template_id, "index.html")
 
         clinical_context = r2_storage.get_text(client, context_key)
         template_html = r2_storage.get_text(client, template_html_key)
         filled_html = gemini_service.generate_discharge_summary(clinical_context, template_html)
 
-        html_key = r2_storage.summary_html_key(user_id, patient_id, summary_id)
-        r2_storage.put_text(client, html_key, filled_html, "text/html; charset=utf-8")
-        r2_storage.save_summary_ref(client, summary_id, user_id, patient_id, html_key)
+        summary_prefix = r2_storage.summary_prefix(user_id, patient_id, summary_id)
+        template_prefix = r2_storage.template_prefix(user_id, template_id)
+
+        r2_storage.put_text(
+            client,
+            r2_storage.summary_asset_key(user_id, patient_id, summary_id, "index.html"),
+            filled_html,
+            "text/html; charset=utf-8",
+        )
+        r2_storage.copy_prefix(
+            client,
+            template_prefix,
+            summary_prefix,
+            exclude_names={"index.html"},
+        )
 
         return {
             "summary_id": summary_id,
-            "view_url": public_url(request, f"/view/summary/{summary_id}/index.html"),
+            "view_url": public_url(
+                request,
+                f"/view/{user_id}/summary/{patient_id}/{summary_id}/index.html",
+            ),
         }
     except HTTPException:
         raise
@@ -335,7 +350,7 @@ async def convert_pdf(request: Request, file: UploadFile = File(...)):
 
         return {
             "job_id": job_id,
-            "view_url": public_url(request, f"/view/{job_id}/index.html"),
+            "view_url": public_url(request, f"/view/legacy/{job_id}/index.html"),
         }
     except HTTPException:
         raise

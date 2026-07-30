@@ -1,4 +1,5 @@
 import os
+import re
 import time
 from datetime import datetime, timezone
 from io import BytesIO
@@ -19,10 +20,6 @@ def gemini_client() -> genai.Client:
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY environment variable is missing.")
     return genai.Client(api_key=api_key)
-
-
-def model_name() -> str:
-    return os.environ.get("GEMINI_MODEL")
 
 
 def validate_image_filename(filename: str) -> None:
@@ -120,19 +117,57 @@ def run_extraction(image_items: list[tuple[str, bytes]]) -> str:
     return document
 
 
+def model_name() -> str:
+    return os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+
+
+def finalize_summary_html(template_html: str, filled_html: str) -> str:
+    """Keep the template head so copied relative CSS/font assets resolve correctly."""
+    head_match = re.search(r"<head[^>]*>.*?</head>", template_html, re.IGNORECASE | re.DOTALL)
+    if not head_match:
+        return filled_html
+
+    template_head = head_match.group(0)
+    if re.search(r"<head[^>]*>.*?</head>", filled_html, re.IGNORECASE | re.DOTALL):
+        return re.sub(
+            r"<head[^>]*>.*?</head>",
+            template_head,
+            filled_html,
+            count=1,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
+    if re.search(r"<html[^>]*>", filled_html, re.IGNORECASE):
+        return re.sub(
+            r"(<html[^>]*>)",
+            r"\1" + template_head,
+            filled_html,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+    return (
+        "<!DOCTYPE html>\n<html>\n"
+        f"{template_head}\n"
+        f"<body>\n{filled_html}\n</body>\n"
+        "</html>"
+    )
+
+
 def generate_discharge_summary(clinical_context: str, template_html: str) -> str:
     client = gemini_client()
     prompt = f"""
 You are an expert clinical documentation assistant.
 
-Using the clinical context extracted from patient document images and the discharge summary HTML template below, produce a complete discharge summary as a single self-contained HTML document.
+Using the clinical context extracted from patient document images and the discharge summary HTML template below, produce a complete discharge summary HTML document.
 
 Requirements:
-1. Follow the structure, sections, and styling cues of the template as closely as possible.
+1. Follow the structure, sections, and layout of the template as closely as possible.
 2. Fill in patient-specific details only from the clinical context. Do not invent facts.
 3. If a field is missing in the clinical context, leave a clear placeholder such as "[Not documented]".
 4. Return ONLY valid HTML for the final discharge summary.
-5. Prefer self-contained HTML so it can be viewed without external CSS files.
+5. Preserve the template page structure and class names where possible so existing CSS continues to work.
+6. Keep the same relative asset filenames from the template head (for example base.min.css, fancy.min.css, bg1.png).
 
 Clinical context:
 {clinical_context}
@@ -159,7 +194,7 @@ Template HTML:
                 text = "\n".join(lines).strip()
             if not text:
                 raise RuntimeError("Gemini returned empty HTML.")
-            return text
+            return finalize_summary_html(template_html, text)
         except Exception as exc:
             last_error = exc
             time.sleep(3 * attempt)
