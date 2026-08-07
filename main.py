@@ -1,21 +1,30 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
-import subprocess
+import asyncio
 import shutil
 import os
 import uuid
-from pathlib import Path
+from contextlib import asynccontextmanager
 from typing import Optional
 
 from dotenv import load_dotenv
 
+import docx_conversion
 import gemini_service
 import r2_storage
 
 load_dotenv()
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    docx_conversion.start_listener()
+    yield
+    docx_conversion.stop_listener()
+
+
+app = FastAPI(lifespan=lifespan)
 
 _cors_origins = [
     origin.strip()
@@ -62,41 +71,6 @@ def cleanup_paths(*paths: str) -> None:
             pass
 
 
-def libreoffice_binary() -> str:
-    for candidate in ("soffice", "libreoffice"):
-        path = shutil.which(candidate)
-        if path:
-            return path
-    raise HTTPException(status_code=503, detail="LibreOffice is not installed.")
-
-
-def convert_docx_to_pdf(input_path: str, output_dir: str, profile_dir: str) -> str:
-    os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(profile_dir, exist_ok=True)
-
-    command = [
-        libreoffice_binary(),
-        f"-env:UserInstallation={Path(profile_dir).resolve().as_uri()}",
-        "--headless",
-        "--convert-to",
-        "pdf",
-        "--outdir",
-        output_dir,
-        input_path,
-    ]
-    result = subprocess.run(command, capture_output=True, text=True)
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "Unknown LibreOffice error.").strip()
-        raise HTTPException(status_code=500, detail=f"DOCX to PDF conversion failed: {detail}")
-
-    base_name = os.path.splitext(os.path.basename(input_path))[0]
-    pdf_path = os.path.join(output_dir, f"{base_name}.pdf")
-    if not os.path.isfile(pdf_path):
-        raise HTTPException(status_code=500, detail="LibreOffice completed but generated no PDF file.")
-
-    return pdf_path
-
-
 @app.get("/", response_class=HTMLResponse)
 def root():
     return (
@@ -116,6 +90,7 @@ def health_check():
         "service": "discharge_summary_api",
         "r2_configured": r2_storage.r2_configured(),
         "gemini_configured": gemini_service.gemini_configured(),
+        "libreoffice_listener": docx_conversion.conversion_ready(),
     }
 
 
@@ -188,16 +163,18 @@ async def convert_docx_to_pdf_endpoint(file: UploadFile = File(...)):
     if not file.filename or not file.filename.lower().endswith(".docx"):
         raise HTTPException(status_code=400, detail="Uploaded document must be a DOCX file.")
 
+    if not docx_conversion.libreoffice_binary():
+        raise HTTPException(status_code=503, detail="LibreOffice is not installed.")
+
     job_id = str(uuid.uuid4())
     input_path = f"tmp_{job_id}.docx"
     output_dir = f"dir_{job_id}"
-    profile_dir = f"lo_profile_{job_id}"
 
     try:
         with open(input_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        pdf_path = convert_docx_to_pdf(input_path, output_dir, profile_dir)
+        pdf_path = await asyncio.to_thread(docx_conversion.convert_docx_to_pdf, input_path, output_dir)
         with open(pdf_path, "rb") as pdf_file:
             pdf_bytes = pdf_file.read()
 
@@ -209,7 +186,9 @@ async def convert_docx_to_pdf_endpoint(file: UploadFile = File(...)):
         )
     except HTTPException:
         raise
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
-        cleanup_paths(input_path, output_dir, profile_dir)
+        cleanup_paths(input_path, output_dir)
