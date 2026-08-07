@@ -1,10 +1,16 @@
 .venv
 venv
+.env
+__pycache__/
+*.pyc
+
+# Local test artifacts
 *.pdf
 *.html
-.env
 *.zip
-converted_result
-__pycache__
-__pycache__/*
-*.pyc
+*.docx
+
+# Runtime temp files from conversion endpoints
+tmp_*
+dir_*
+lo_profile_*

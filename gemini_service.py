@@ -1,5 +1,4 @@
 import os
-import re
 import time
 from datetime import datetime, timezone
 from io import BytesIO
@@ -30,8 +29,8 @@ def validate_image_filename(filename: str) -> None:
         raise ValueError(f"Unsupported image type: {filename}")
 
 
-def load_image(content: bytes) -> Image.Image:
-    return Image.open(BytesIO(content))
+def model_name() -> str:
+    return os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 
 def extract_page_context(
@@ -72,11 +71,11 @@ Return ONLY the structured Markdown text for this page.
                 config=types.GenerateContentConfig(temperature=0.1),
             )
             extracted_text = (response.text or "").strip()
-            page_block = f"<!-- PAGE {page_num}: {filename} -->\n"
-            page_block += f"# PAGE {page_num}: {filename}\n\n"
-            page_block += f"{extracted_text}\n\n"
-            page_block += "---\n"
-            return page_block
+            return (
+                f"# PAGE {page_num}: {filename}\n\n"
+                f"{extracted_text}\n\n"
+                "---\n"
+            )
         except Exception as exc:
             last_error = exc
             err_str = str(exc)
@@ -100,103 +99,17 @@ def run_extraction(image_items: list[tuple[str, bytes]]) -> str:
 
     for idx, (filename, content) in enumerate(image_items, start=1):
         validate_image_filename(filename)
-        image = load_image(content)
+        image = Image.open(BytesIO(content))
         try:
             document += extract_page_context(client, image, filename, idx, total_pages)
             document += "\n"
         except Exception as exc:
             document += (
-                f"<!-- PAGE {idx}: {filename} -->\n"
                 f"# PAGE {idx}: {filename}\n\n"
                 f"> Error processing page '{filename}': {exc}\n\n"
-                f"---\n\n"
+                "---\n\n"
             )
         if idx < total_pages:
             time.sleep(2)
 
     return document
-
-
-def model_name() -> str:
-    return os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-
-
-def finalize_summary_html(template_html: str, filled_html: str) -> str:
-    """Keep the template head so copied relative CSS/font assets resolve correctly."""
-    head_match = re.search(r"<head[^>]*>.*?</head>", template_html, re.IGNORECASE | re.DOTALL)
-    if not head_match:
-        return filled_html
-
-    template_head = head_match.group(0)
-    if re.search(r"<head[^>]*>.*?</head>", filled_html, re.IGNORECASE | re.DOTALL):
-        return re.sub(
-            r"<head[^>]*>.*?</head>",
-            template_head,
-            filled_html,
-            count=1,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-
-    if re.search(r"<html[^>]*>", filled_html, re.IGNORECASE):
-        return re.sub(
-            r"(<html[^>]*>)",
-            r"\1" + template_head,
-            filled_html,
-            count=1,
-            flags=re.IGNORECASE,
-        )
-
-    return (
-        "<!DOCTYPE html>\n<html>\n"
-        f"{template_head}\n"
-        f"<body>\n{filled_html}\n</body>\n"
-        "</html>"
-    )
-
-
-def generate_discharge_summary(clinical_context: str, template_html: str) -> str:
-    client = gemini_client()
-    prompt = f"""
-You are an expert clinical documentation assistant.
-
-Using the clinical context extracted from patient document images and the discharge summary HTML template below, produce a complete discharge summary HTML document.
-
-Requirements:
-1. Follow the structure, sections, and layout of the template as closely as possible.
-2. Fill in patient-specific details only from the clinical context. Do not invent facts.
-3. If a field is missing in the clinical context, leave a clear placeholder such as "[Not documented]".
-4. Return ONLY valid HTML for the final discharge summary.
-5. Preserve the template page structure and class names where possible so existing CSS continues to work.
-6. Keep the same relative asset filenames from the template head (for example base.min.css, fancy.min.css, bg1.png).
-
-Clinical context:
-{clinical_context}
-
-Template HTML:
-{template_html}
-"""
-
-    last_error: BaseException = RuntimeError("Summary generation failed without raising a specific exception")
-    for attempt in range(1, 4):
-        try:
-            response = client.models.generate_content(
-                model=model_name(),
-                contents=[prompt],
-                config=types.GenerateContentConfig(temperature=0.2),
-            )
-            text = (response.text or "").strip()
-            if text.startswith("```"):
-                lines = text.splitlines()
-                if lines and lines[0].startswith("```"):
-                    lines = lines[1:]
-                if lines and lines[-1].strip() == "```":
-                    lines = lines[:-1]
-                text = "\n".join(lines).strip()
-            if not text:
-                raise RuntimeError("Gemini returned empty HTML.")
-            return finalize_summary_html(template_html, text)
-        except Exception as exc:
-            last_error = exc
-            time.sleep(3 * attempt)
-
-    raise last_error

@@ -5,20 +5,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install underlying operating system build toolkits
 RUN apt-get update && apt-get install -y \
-    curl \
-    git \
-    sudo \
     python3 \
     python3-pip \
+    libreoffice-writer \
     && rm -rf /var/lib/apt/lists/*
 
-# Clone and compile pdf2htmlEX using its official installer scripts
-RUN git clone https://github.com/pdf2htmlEX/pdf2htmlEX.git /opt/pdf2htmlEX
-WORKDIR /opt/pdf2htmlEX
-ENV UNATTENDED="-y"
-RUN buildScripts/getBuildToolsApt && buildScripts/buildInstallLocallyApt
-
-# Shift back to project sandbox directory 
+# Shift working directory to /code
 WORKDIR /code
 
 # Copy and install python service dependencies
