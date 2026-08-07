@@ -4,12 +4,6 @@ venv
 __pycache__/
 *.pyc
 
-# Local test artifacts
-*.pdf
-*.html
-*.zip
-*.docx
-
 # Runtime temp files from conversion endpoints
 tmp_*
 dir_*
