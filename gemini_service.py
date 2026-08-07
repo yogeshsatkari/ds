@@ -128,7 +128,7 @@ def generate_json(prompt: str, schema: dict, max_retries: int = 4) -> dict:
                 config=types.GenerateContentConfig(
                     temperature=0.1,
                     response_mime_type="application/json",
-                    response_json_schema=schema,
+                    response_schema=schema,
                 ),
             )
             text = (response.text or "").strip()
