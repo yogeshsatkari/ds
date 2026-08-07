@@ -9,5 +9,5 @@ Pillow==10.4.0
 # Document processing
 # python-docx
 docxtpl
-# docxcompose
+docxcompose
 jsonschema
