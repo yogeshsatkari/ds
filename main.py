@@ -12,6 +12,8 @@ from dotenv import load_dotenv
 
 import gemini_service
 import r2_storage
+from data_to_docx.render import render_discharge_summary_from_template
+from pipeline.extraction_pipeline import run_extraction_pipeline
 
 load_dotenv()
 
@@ -29,6 +31,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Patient-Id", "X-Extraction-Id"],
 )
 
 
@@ -102,8 +105,9 @@ def root():
     return (
         "<h1>Discharge Summary API</h1>"
         "<ul>"
-        "<li><code>POST /extract</code> — upload images, extract clinical context as markdown</li>"
-        "<li><code>GET /extractions/{user_id}/{patient_id}/{extraction_id}</code> — fetch stored extraction</li>"
+        "<li><code>POST /extract</code> — upload images, returns filled discharge summary DOCX</li>"
+        "<li><code>GET /extractions/{user_id}/{patient_id}/{extraction_id}</code> — fetch stored markdown</li>"
+        "<li><code>GET /extractions/{user_id}/{patient_id}/{extraction_id}/context.json</code> — fetch stored context JSON</li>"
         "<li><code>POST /convert/docx-to-pdf</code> — convert DOCX to PDF</li>"
         "</ul>"
     )
@@ -136,6 +140,23 @@ def get_extraction(user_id: str, patient_id: str, extraction_id: str):
     return Response(content=markdown, media_type="text/markdown; charset=utf-8")
 
 
+@app.get("/extractions/{user_id}/{patient_id}/{extraction_id}/context.json")
+def get_extraction_context(user_id: str, patient_id: str, extraction_id: str):
+    require_r2()
+    user_id = parse_uuid(user_id, "user_id")
+    patient_id = parse_uuid(patient_id, "patient_id")
+    extraction_id = parse_uuid(extraction_id, "extraction_id")
+
+    client = r2_storage.r2_client()
+    key = r2_storage.extraction_json_key(user_id, patient_id, extraction_id)
+    try:
+        context = r2_storage.get_json(client, key)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Context JSON not found.") from exc
+
+    return context
+
+
 @app.post("/extract")
 async def extract_images(
     user_id: str = Form(...),
@@ -165,16 +186,26 @@ async def extract_images(
                 raise HTTPException(status_code=400, detail=f"Empty image file: {filename}")
             image_items.append((filename, content))
 
-        consolidated_context = gemini_service.run_extraction(image_items)
+        markdown, context = run_extraction_pipeline(image_items)
+        docx_bytes = render_discharge_summary_from_template(context)
 
         client = r2_storage.r2_client()
-        context_key = r2_storage.extraction_key(user_id, patient_id, extraction_id)
-        r2_storage.put_text(client, context_key, consolidated_context)
+        md_key = r2_storage.extraction_key(user_id, patient_id, extraction_id)
+        json_key = r2_storage.extraction_json_key(user_id, patient_id, extraction_id)
+        r2_storage.put_text(client, md_key, markdown)
+        r2_storage.put_json(client, json_key, context)
 
-        return {
-            "patient_id": patient_id,
-            "extraction_id": extraction_id,
-        }
+        patient_slug = context.get("patient_name", "discharge-summary").strip() or "discharge-summary"
+        safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in patient_slug)
+        return Response(
+            content=docx_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={
+                "Content-Disposition": f'attachment; filename="{safe_name}.docx"',
+                "X-Patient-Id": patient_id,
+                "X-Extraction-Id": extraction_id,
+            },
+        )
     except HTTPException:
         raise
     except ValueError as exc:

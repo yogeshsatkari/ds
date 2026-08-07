@@ -1,0 +1,113 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": [
+    "patient_name",
+    "age",
+    "sex",
+    "unit_incharge",
+    "treating_doctor",
+    "cr_no",
+    "uhid_no",
+    "date_of_admission",
+    "date_of_discharge",
+    "ayushman_code",
+    "chief_complaints",
+    "diagnoses",
+    "clinical_course",
+    "include_investigation_table",
+    "investigation_dates",
+    "investigation_rows",
+    "include_investigation_reports",
+    "investigation_reports",
+    "discharge_advice",
+    "discharge_note",
+    "signing_doctors",
+    "discharge_signatory"
+  ],
+  "properties": {
+    "patient_name": { "type": "string" },
+    "age": { "type": "string" },
+    "sex": { "type": "string" },
+    "unit_incharge": { "type": "string", "description": "Unit in-charge doctor if documented; otherwise empty string." },
+    "treating_doctor": {
+      "type": "string",
+      "description": "Primary treating/consulting specialist for the case (e.g. neurologist from care plan). Usually same as discharge_signatory."
+    },
+    "cr_no": { "type": "string" },
+    "uhid_no": { "type": "string" },
+    "date_of_admission": { "type": "string" },
+    "date_of_discharge": { "type": "string" },
+    "ayushman_code": { "type": "string" },
+    "chief_complaints": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "diagnoses": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "clinical_course": {
+      "type": "string",
+      "description": "Narrative of hospital stay only. Do not include dated vitals, lab values, investigation advised lists, or discharge status sentence."
+    },
+    "include_investigation_table": {
+      "type": "boolean",
+      "description": "Set true only when dated vitals/lab values exist for the investigation grid. If false, investigation_dates and investigation_rows must be []."
+    },
+    "investigation_dates": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "investigation_rows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "values"],
+        "properties": {
+          "name": { "type": "string" },
+          "values": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    },
+    "include_investigation_reports": {
+      "type": "boolean",
+      "description": "Set true only when narrative test reports exist (ultrasound, nerve conduction, MRI, etc.). If false, investigation_reports must be []."
+    },
+    "investigation_reports": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["title", "findings"],
+        "properties": {
+          "title": { "type": "string" },
+          "findings": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 1
+          }
+        }
+      }
+    },
+    "discharge_advice": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "discharge_note": { "type": "string" },
+    "signing_doctors": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "discharge_signatory": {
+      "type": "string",
+      "description": "Senior doctor signing the discharge summary (right column). Usually the same as treating_doctor."
+    }
+  }
+}

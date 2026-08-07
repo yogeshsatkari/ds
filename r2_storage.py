@@ -1,3 +1,4 @@
+import json
 import os
 
 import boto3
@@ -30,7 +31,11 @@ def bucket() -> str:
 
 
 def extraction_key(user_id: str, patient_id: str, extraction_id: str) -> str:
-    return f"users/{user_id}/patients/{patient_id}/extractions/{extraction_id}.md"
+    return f"users/{user_id}/patients/{patient_id}/extractions/context.md"
+
+
+def extraction_json_key(user_id: str, patient_id: str, extraction_id: str) -> str:
+    return f"users/{user_id}/patients/{patient_id}/extractions/context.json"
 
 
 def put_text(client, key: str, text: str) -> None:
@@ -39,6 +44,15 @@ def put_text(client, key: str, text: str) -> None:
         Key=key,
         Body=text.encode("utf-8"),
         ContentType="text/markdown; charset=utf-8",
+    )
+
+
+def put_json(client, key: str, data: dict) -> None:
+    client.put_object(
+        Bucket=bucket(),
+        Key=key,
+        Body=json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"),
+        ContentType="application/json; charset=utf-8",
     )
 
 
@@ -51,3 +65,14 @@ def get_text(client, key: str) -> str:
             raise FileNotFoundError(key) from exc
         raise
     return obj["Body"].read().decode("utf-8")
+
+
+def get_json(client, key: str) -> dict:
+    try:
+        obj = client.get_object(Bucket=bucket(), Key=key)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code in ("NoSuchKey", "404"):
+            raise FileNotFoundError(key) from exc
+        raise
+    return json.loads(obj["Body"].read().decode("utf-8"))

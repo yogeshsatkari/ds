@@ -1,3 +1,4 @@
+import json
 import os
 import time
 from datetime import datetime, timezone
@@ -113,3 +114,33 @@ def run_extraction(image_items: list[tuple[str, bytes]]) -> str:
             time.sleep(2)
 
     return document
+
+
+def generate_json(prompt: str, schema: dict, max_retries: int = 4) -> dict:
+    client = gemini_client()
+    last_error: BaseException = RuntimeError("Gemini JSON request failed.")
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = client.models.generate_content(
+                model=model_name(),
+                contents=[prompt],
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    response_mime_type="application/json",
+                    response_json_schema=schema,
+                ),
+            )
+            text = (response.text or "").strip()
+            if not text:
+                raise RuntimeError("Gemini returned empty JSON.")
+            return json.loads(text)
+        except Exception as exc:
+            last_error = exc
+            err = str(exc)
+            if "429" in err or "RESOURCE_EXHAUSTED" in err or "getaddrinfo" in err:
+                time.sleep(6 * attempt)
+            elif attempt < max_retries:
+                time.sleep(3)
+
+    raise last_error

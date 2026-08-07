@@ -1,0 +1,53 @@
+{
+  "patient_name": "MS. BUSHRA ANSARI",
+  "age": "26 YEARS",
+  "sex": "FEMALE",
+  "unit_incharge": "DR. A.N PANDEY",
+  "treating_doctor": "DR. VISHWA PRAKASH TIWARI",
+  "cr_no": "49818/26",
+  "uhid_no": "3342991",
+  "date_of_admission": "21/07/26",
+  "date_of_discharge": "30/07/26",
+  "ayushman_code": "MG001A",
+  "chief_complaints": [
+    "GENERALISED BODY WEAKNESS SINCE 2 YEARS",
+    "JOINT PAIN",
+    "PROXIMAL MUSCLE WEAKNESS"
+  ],
+  "diagnoses": [
+    "PERIMYSIAL WITH PERI FASCICULAR MYOPATHY",
+    "PROXIMAL MUSCLE WEAKNESS"
+  ],
+  "clinical_course": "PATIENT CAME TO SMIH EMERGENCY WITH COMPLAINTS OF GENERALISED BODY WEAKNESS SINCE 2 YEARS / JOINT PAIN / PROXIMAL MUSCLE WEAKNESS FOR WHICH PATIENT WAS ADMITTED IN MEDICINE DEPARTMENT IN MEDICINE WARD. PATIENT WAS EVALUATED AND INVESTIGATED ACCORDING TO ALL STANDARD PROTOCOL AND WAS DIAGNOSED AS A CASE OF PERIMYSIAL WITH PERI FASCICULAR MYOPATHY / PROXIMAL MUSCLE WEAKNESS. PSYCHIATRY REFERENCE WAS DONE I/V/O DOPAMINE DISORDER AND ADVISE WAS FOLLOWED. INJECTION RITUXIMAB 500MG WAS GIVEN ON 28/07/2026 AND ANOTHER 500MG ON 29/07/2026. PATIENT IS BEING MANAGED ON IV AND ORAL MEDICATIONS.",
+  "include_investigation_table": true,
+  "investigation_dates": ["21/07/26", "22/07/26", "27/07/26"],
+  "investigation_rows": [
+    {
+      "name": "A/G Ratio (Albumin/Globulin Ratio)",
+      "values": ["1.41", "1.52", "1.38"]
+    },
+    {
+      "name": "Albumin Serum [gm/dL] (3.5 - 5)",
+      "values": ["3.8", "4.1", "3.6"]
+    },
+    {
+      "name": "Alkaline Phosphatase [U/L] (38 - 126)",
+      "values": ["84", "77", "76"]
+    }
+  ],
+  "include_investigation_reports": true,
+  "investigation_reports": [
+    {
+      "title": "NERVE CONDUCTION STUDIES (23/07/2026)",
+      "findings": ["NERVE CONDUCTION STUDIES OF ALL FOUR LIMBS IS NORMAL"]
+    }
+  ],
+  "discharge_advice": [
+    "TOFACITINIB TAB ONE ONCE DAILY AT NIGHT",
+    "TAB FOLVITE 5MG 1 TAB ONCE DAILY EXCEPT OF FRIDAYS",
+    "TAB PANTOP 40 MG 1 TAB ONCE A DAY BEFORE BREAKFAST"
+  ],
+  "discharge_note": "THE PATIENT IS IN STABLE CONDITION AND BEING DISCHARGED WITH ADVICE TO FOLLOW UP IN RHEUMATOLOGY OPD AFTER 7 DAYS OR SOS IN CASE OF EMERGENCY.",
+  "signing_doctors": ["DR.TANVEER (S.R)", "DR.SHEETANSHU", "DR. SAIRA"],
+  "discharge_signatory": "DR. VISHWA PRAKASH TIWARI"
+}
