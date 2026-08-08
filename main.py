@@ -31,7 +31,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Patient-Id", "X-Extraction-Id"],
+    expose_headers=["X-Patient-Id"],
 )
 
 
@@ -73,6 +73,12 @@ def libreoffice_binary() -> str:
     raise HTTPException(status_code=503, detail="LibreOffice is not installed.")
 
 
+def docx_filename(patient_name: str) -> str:
+    patient_slug = patient_name.strip() or "discharge-summary"
+    safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in patient_slug)
+    return f"{safe_name}.docx"
+
+
 def convert_docx_to_pdf(input_path: str, output_dir: str, profile_dir: str) -> str:
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(profile_dir, exist_ok=True)
@@ -106,8 +112,9 @@ def root():
         "<h1>Discharge Summary API</h1>"
         "<ul>"
         "<li><code>POST /extract</code> — upload images, returns filled discharge summary DOCX</li>"
-        "<li><code>GET /extractions/{user_id}/{patient_id}/{extraction_id}</code> — fetch stored markdown</li>"
-        "<li><code>GET /extractions/{user_id}/{patient_id}/{extraction_id}/context.json</code> — fetch stored context JSON</li>"
+        "<li><code>GET /extractions/{user_id}/{patient_id}</code> — fetch stored markdown</li>"
+        "<li><code>GET /extractions/{user_id}/{patient_id}/context.json</code> — fetch stored context JSON</li>"
+        "<li><code>GET /extractions/{user_id}/{patient_id}/discharge-summary.docx</code> — fetch stored discharge summary DOCX</li>"
         "<li><code>POST /convert/docx-to-pdf</code> — convert DOCX to PDF</li>"
         "</ul>"
     )
@@ -123,15 +130,14 @@ def health_check():
     }
 
 
-@app.get("/extractions/{user_id}/{patient_id}/{extraction_id}")
-def get_extraction(user_id: str, patient_id: str, extraction_id: str):
+@app.get("/extractions/{user_id}/{patient_id}")
+def get_extraction(user_id: str, patient_id: str):
     require_r2()
     user_id = parse_uuid(user_id, "user_id")
     patient_id = parse_uuid(patient_id, "patient_id")
-    extraction_id = parse_uuid(extraction_id, "extraction_id")
 
     client = r2_storage.r2_client()
-    key = r2_storage.extraction_key(user_id, patient_id, extraction_id)
+    key = r2_storage.extraction_key(user_id, patient_id)
     try:
         markdown = r2_storage.get_text(client, key)
     except FileNotFoundError as exc:
@@ -140,21 +146,49 @@ def get_extraction(user_id: str, patient_id: str, extraction_id: str):
     return Response(content=markdown, media_type="text/markdown; charset=utf-8")
 
 
-@app.get("/extractions/{user_id}/{patient_id}/{extraction_id}/context.json")
-def get_extraction_context(user_id: str, patient_id: str, extraction_id: str):
+@app.get("/extractions/{user_id}/{patient_id}/context.json")
+def get_extraction_context(user_id: str, patient_id: str):
     require_r2()
     user_id = parse_uuid(user_id, "user_id")
     patient_id = parse_uuid(patient_id, "patient_id")
-    extraction_id = parse_uuid(extraction_id, "extraction_id")
 
     client = r2_storage.r2_client()
-    key = r2_storage.extraction_json_key(user_id, patient_id, extraction_id)
+    key = r2_storage.extraction_json_key(user_id, patient_id)
     try:
         context = r2_storage.get_json(client, key)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Context JSON not found.") from exc
 
     return context
+
+
+@app.get("/extractions/{user_id}/{patient_id}/discharge-summary.docx")
+def get_discharge_summary_docx(user_id: str, patient_id: str):
+    require_r2()
+    user_id = parse_uuid(user_id, "user_id")
+    patient_id = parse_uuid(patient_id, "patient_id")
+
+    client = r2_storage.r2_client()
+    docx_key = r2_storage.discharge_summary_docx_key(user_id, patient_id)
+    json_key = r2_storage.extraction_json_key(user_id, patient_id)
+
+    try:
+        docx_bytes, _ = r2_storage.get_bytes(client, docx_key)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Discharge summary DOCX not found.") from exc
+
+    filename = "discharge-summary.docx"
+    try:
+        context = r2_storage.get_json(client, json_key)
+        filename = docx_filename(context.get("patient_name", ""))
+    except FileNotFoundError:
+        pass
+
+    return Response(
+        content=docx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/extract")
@@ -175,7 +209,6 @@ async def extract_images(
     else:
         patient_id = str(uuid.uuid4())
 
-    extraction_id = str(uuid.uuid4())
     image_items: list[tuple[str, bytes]] = []
 
     try:
@@ -190,20 +223,26 @@ async def extract_images(
         docx_bytes = render_discharge_summary_from_template(context)
 
         client = r2_storage.r2_client()
-        md_key = r2_storage.extraction_key(user_id, patient_id, extraction_id)
-        json_key = r2_storage.extraction_json_key(user_id, patient_id, extraction_id)
+        md_key = r2_storage.extraction_key(user_id, patient_id)
+        json_key = r2_storage.extraction_json_key(user_id, patient_id)
+        docx_key = r2_storage.discharge_summary_docx_key(user_id, patient_id)
+
         r2_storage.put_text(client, md_key, markdown)
         r2_storage.put_json(client, json_key, context)
+        r2_storage.put_bytes(
+            client,
+            docx_key,
+            docx_bytes,
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
 
-        patient_slug = context.get("patient_name", "discharge-summary").strip() or "discharge-summary"
-        safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in patient_slug)
+        filename = docx_filename(context.get("patient_name", ""))
         return Response(
             content=docx_bytes,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             headers={
-                "Content-Disposition": f'attachment; filename="{safe_name}.docx"',
+                "Content-Disposition": f'attachment; filename="{filename}"',
                 "X-Patient-Id": patient_id,
-                "X-Extraction-Id": extraction_id,
             },
         )
     except HTTPException:

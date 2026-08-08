@@ -1,5 +1,6 @@
 import json
 import os
+from typing import Optional
 
 import boto3
 from botocore.config import Config
@@ -30,12 +31,20 @@ def bucket() -> str:
     return os.environ["R2_BUCKET"]
 
 
-def extraction_key(user_id: str, patient_id: str, extraction_id: str) -> str:
-    return f"users/{user_id}/patients/{patient_id}/extractions/context.md"
+def extraction_prefix(user_id: str, patient_id: str) -> str:
+    return f"users/{user_id}/patients/{patient_id}/extractions"
 
 
-def extraction_json_key(user_id: str, patient_id: str, extraction_id: str) -> str:
-    return f"users/{user_id}/patients/{patient_id}/extractions/context.json"
+def extraction_key(user_id: str, patient_id: str) -> str:
+    return f"{extraction_prefix(user_id, patient_id)}/context.md"
+
+
+def extraction_json_key(user_id: str, patient_id: str) -> str:
+    return f"{extraction_prefix(user_id, patient_id)}/context.json"
+
+
+def discharge_summary_docx_key(user_id: str, patient_id: str) -> str:
+    return f"{extraction_prefix(user_id, patient_id)}/discharge-summary.docx"
 
 
 def put_text(client, key: str, text: str) -> None:
@@ -53,6 +62,21 @@ def put_json(client, key: str, data: dict) -> None:
         Key=key,
         Body=json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"),
         ContentType="application/json; charset=utf-8",
+    )
+
+
+def put_bytes(
+    client,
+    key: str,
+    body: bytes,
+    *,
+    content_type: str = "application/octet-stream",
+) -> None:
+    client.put_object(
+        Bucket=bucket(),
+        Key=key,
+        Body=body,
+        ContentType=content_type,
     )
 
 
@@ -76,3 +100,15 @@ def get_json(client, key: str) -> dict:
             raise FileNotFoundError(key) from exc
         raise
     return json.loads(obj["Body"].read().decode("utf-8"))
+
+
+def get_bytes(client, key: str) -> tuple[bytes, Optional[str]]:
+    try:
+        obj = client.get_object(Bucket=bucket(), Key=key)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code in ("NoSuchKey", "404"):
+            raise FileNotFoundError(key) from exc
+        raise
+    content_type = obj.get("ContentType")
+    return obj["Body"].read(), content_type
