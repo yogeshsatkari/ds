@@ -112,7 +112,8 @@ def root():
         "<h1>Discharge Summary API</h1>"
         "<ul>"
         "<li><code>POST /extract</code> — upload images, returns filled discharge summary DOCX</li>"
-        "<li><code>GET /extractions/{user_id}/{patient_id}</code> — fetch stored markdown</li>"
+        "<li><code>GET /users/{user_id}/patients</code> — list past patients for a user</li>"
+        "<li><code>GET /extractions/{user_id}/{patient_id}/context.md</code> — fetch stored markdown</li>"
         "<li><code>GET /extractions/{user_id}/{patient_id}/context.json</code> — fetch stored context JSON</li>"
         "<li><code>GET /extractions/{user_id}/{patient_id}/discharge-summary.docx</code> — fetch stored discharge summary DOCX</li>"
         "<li><code>POST /convert/docx-to-pdf</code> — convert DOCX to PDF</li>"
@@ -130,7 +131,17 @@ def health_check():
     }
 
 
-@app.get("/extractions/{user_id}/{patient_id}")
+@app.get("/users/{user_id}/patients")
+def list_patients(user_id: str):
+    require_r2()
+    user_id = parse_uuid(user_id, "user_id")
+
+    client = r2_storage.r2_client()
+    patients = r2_storage.list_user_patients(client, user_id)
+    return {"user_id": user_id, "patients": patients}
+
+
+@app.get("/extractions/{user_id}/{patient_id}/context.md")
 def get_extraction(user_id: str, patient_id: str):
     require_r2()
     user_id = parse_uuid(user_id, "user_id")
