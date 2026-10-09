@@ -1,8 +1,10 @@
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from io import BytesIO
+
 
 from PIL import Image
 from google import genai
@@ -88,7 +90,28 @@ Return ONLY the structured Markdown text for this page.
     raise last_error
 
 
-def run_extraction(image_items: list[tuple[str, bytes]]) -> str:
+def _process_single_page(
+    client: genai.Client,
+    content: bytes,
+    filename: str,
+    idx: int,
+    total_pages: int,
+) -> tuple[int, str]:
+    validate_image_filename(filename)
+    image = Image.open(BytesIO(content))
+    try:
+        page_text = extract_page_context(client, image, filename, idx, total_pages)
+        return (idx, page_text)
+    except Exception as exc:
+        fallback_text = (
+            f"# PAGE {idx}: {filename}\n\n"
+            f"> Error processing page '{filename}': {exc}\n\n"
+            "---\n"
+        )
+        return (idx, fallback_text)
+
+
+def run_extraction(image_items: list[tuple[str, bytes]], max_workers: int = 5) -> str:
     client = gemini_client()
     total_pages = len(image_items)
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -98,22 +121,30 @@ def run_extraction(image_items: list[tuple[str, bytes]]) -> str:
     document += f"**Total Pages**: {total_pages}\n\n"
     document += "=" * 60 + "\n\n"
 
-    for idx, (filename, content) in enumerate(image_items, start=1):
-        validate_image_filename(filename)
-        image = Image.open(BytesIO(content))
-        try:
-            document += extract_page_context(client, image, filename, idx, total_pages)
+    if total_pages == 0:
+        return document
+
+    worker_count = min(max_workers, total_pages)
+    results: dict[int, str] = {}
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_to_idx = {
+            executor.submit(_process_single_page, client, content, filename, idx, total_pages): idx
+            for idx, (filename, content) in enumerate(image_items, start=1)
+        }
+
+        for future in as_completed(future_to_idx):
+            idx, page_text = future.result()
+            results[idx] = page_text
+
+    # Assemble pages in strict original chronological order (Page 1 -> Page N)
+    for idx in range(1, total_pages + 1):
+        if idx in results:
+            document += results[idx]
             document += "\n"
-        except Exception as exc:
-            document += (
-                f"# PAGE {idx}: {filename}\n\n"
-                f"> Error processing page '{filename}': {exc}\n\n"
-                "---\n\n"
-            )
-        if idx < total_pages:
-            time.sleep(2)
 
     return document
+
 
 
 def generate_json(prompt: str, schema: dict, max_retries: int = 4) -> dict:
