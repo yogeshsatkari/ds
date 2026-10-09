@@ -4,13 +4,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from io import BytesIO
-
+from pathlib import Path
 
 from PIL import Image
+import pypdfium2 as pdfium
 from google import genai
 from google.genai import types
 
-ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp"}
+ALLOWED_DOCUMENT_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".pdf"}
 
 
 def gemini_configured() -> bool:
@@ -24,16 +25,48 @@ def gemini_client() -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
-def validate_image_filename(filename: str) -> None:
+def validate_document_filename(filename: str) -> None:
     if not filename:
-        raise ValueError("Each image must have a filename.")
+        raise ValueError("Each uploaded file must have a filename.")
     ext = os.path.splitext(filename.lower())[1]
-    if ext not in ALLOWED_IMAGE_EXTENSIONS:
-        raise ValueError(f"Unsupported image type: {filename}")
+    if ext not in ALLOWED_DOCUMENT_EXTENSIONS:
+        raise ValueError(f"Unsupported file type: {filename}")
+
+
+def pdf_to_page_images(
+    pdf_bytes: bytes,
+    base_filename: str = "document",
+    dpi: int = 200,
+    jpeg_quality: int = 90,
+) -> list[tuple[str, bytes]]:
+    """Unpacks each page of a PDF into high-quality JPEG image bytes in memory."""
+    pdf = pdfium.PdfDocument(pdf_bytes)
+    page_images: list[tuple[str, bytes]] = []
+    total_pages = len(pdf)
+    scale = dpi / 72.0
+    stem = Path(base_filename).stem or "doc"
+
+    for page_idx in range(total_pages):
+        page = pdf[page_idx]
+        bitmap = page.render(scale=scale)
+        pil_image = bitmap.to_pil()
+
+        if pil_image.mode in ("RGBA", "P"):
+            pil_image = pil_image.convert("RGB")
+
+        buffer = BytesIO()
+        pil_image.save(buffer, format="JPEG", quality=jpeg_quality)
+        jpeg_bytes = buffer.getvalue()
+
+        page_name = f"{stem}_page_{page_idx + 1:03d}.jpg"
+        page_images.append((page_name, jpeg_bytes))
+
+    return page_images
 
 
 def model_name() -> str:
     return os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+
 
 
 def extract_page_context(
@@ -97,7 +130,7 @@ def _process_single_page(
     idx: int,
     total_pages: int,
 ) -> tuple[int, str]:
-    validate_image_filename(filename)
+    validate_document_filename(filename)
     image = Image.open(BytesIO(content))
     try:
         page_text = extract_page_context(client, image, filename, idx, total_pages)

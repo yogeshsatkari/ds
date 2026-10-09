@@ -279,13 +279,24 @@ async def extract_images(
 
     try:
         for index, upload in enumerate(files, start=1):
-            filename = upload.filename or f"page-{index:03d}.jpg"
+            filename = upload.filename or f"upload-{index:03d}"
             content = await upload.read()
             if not content:
-                raise HTTPException(status_code=400, detail=f"Empty image file: {filename}")
-            image_items.append((filename, content))
+                raise HTTPException(status_code=400, detail=f"Empty uploaded file: {filename}")
+
+            if filename.lower().endswith(".pdf"):
+                pdf_pages = gemini_service.pdf_to_page_images(content, base_filename=filename)
+                if not pdf_pages:
+                    raise HTTPException(status_code=400, detail=f"PDF '{filename}' contains no readable pages.")
+                image_items.extend(pdf_pages)
+            else:
+                image_items.append((filename, content))
+
+        if not image_items:
+            raise HTTPException(status_code=400, detail="No readable pages or images found in upload.")
 
         result = run_extraction_pipeline(image_items, discharge_type=discharge_type)
+
 
         client = r2_storage.r2_client()
         md_key = r2_storage.extraction_key(user_id, patient_id)
