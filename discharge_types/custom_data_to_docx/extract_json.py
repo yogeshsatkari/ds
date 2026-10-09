@@ -3,7 +3,7 @@ from pathlib import Path
 
 import gemini_service
 
-from data_to_docx.validate import SAMPLE_PATH, SCHEMA_PATH, load_sample, load_schema, validate_context
+from discharge_types.custom_data_to_docx.validate import SAMPLE_PATH, SCHEMA_PATH, load_sample, load_schema, validate_context
 
 PROMPT_HEADER = """You are a clinical documentation assistant.
 
@@ -129,6 +129,10 @@ def extract_context_from_markdown(
     context = normalize_context(gemini_service.generate_json(prompt, schema))
     validate_context(context)
     return context
+
+
+extract_json_context_from_markdown = extract_context_from_markdown
+
 
 
 def extract_context_json(

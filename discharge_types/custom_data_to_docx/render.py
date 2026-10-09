@@ -10,7 +10,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt
 from docxtpl import DocxTemplate
 
-from data_to_docx.validate import TEMPLATE_PATH, validate_context
+from discharge_types.custom_data_to_docx.validate import TEMPLATE_PATH, validate_context
 
 FONT_NAME = "Liberation Serif"
 FONT_SIZE = Pt(12)

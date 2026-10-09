@@ -12,8 +12,9 @@ from dotenv import load_dotenv
 
 import gemini_service
 import r2_storage
-from data_to_docx.render import render_discharge_summary_from_template
+from discharge_types.standard_md_to_docx.render import parse_patient_metadata_from_md
 from pipeline.extraction_pipeline import run_extraction_pipeline
+
 
 load_dotenv()
 
@@ -113,7 +114,8 @@ def root():
         "<ul>"
         "<li><code>POST /extract</code> — upload images, returns filled discharge summary DOCX</li>"
         "<li><code>GET /users/{user_id}/patients</code> — list past patients for a user</li>"
-        "<li><code>GET /extractions/{user_id}/{patient_id}/context.md</code> — fetch stored markdown</li>"
+        "<li><code>GET /extractions/{user_id}/{patient_id}/context.md</code> — fetch stored raw OCR markdown</li>"
+        "<li><code>GET /extractions/{user_id}/{patient_id}/discharge-summary.md</code> — fetch stored standard markdown</li>"
         "<li><code>GET /extractions/{user_id}/{patient_id}/context.json</code> — fetch stored context JSON</li>"
         "<li><code>GET /extractions/{user_id}/{patient_id}/discharge-summary.docx</code> — fetch stored discharge summary DOCX</li>"
         "<li><code>POST /convert/docx-to-pdf</code> — convert DOCX to PDF</li>"
@@ -157,6 +159,22 @@ def get_extraction(user_id: str, patient_id: str):
     return Response(content=markdown, media_type="text/markdown; charset=utf-8")
 
 
+@app.get("/extractions/{user_id}/{patient_id}/discharge-summary.md")
+def get_discharge_summary_md(user_id: str, patient_id: str):
+    require_r2()
+    user_id = parse_uuid(user_id, "user_id")
+    patient_id = parse_uuid(patient_id, "patient_id")
+
+    client = r2_storage.r2_client()
+    key = r2_storage.discharge_summary_md_key(user_id, patient_id)
+    try:
+        markdown = r2_storage.get_text(client, key)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Discharge summary markdown not found.") from exc
+
+    return Response(content=markdown, media_type="text/markdown; charset=utf-8")
+
+
 @app.get("/extractions/{user_id}/{patient_id}/context.json")
 def get_extraction_context(user_id: str, patient_id: str):
     require_r2()
@@ -173,6 +191,25 @@ def get_extraction_context(user_id: str, patient_id: str):
     return context
 
 
+@app.get("/extractions/{user_id}/{patient_id}/metadata.json")
+def get_extraction_metadata(user_id: str, patient_id: str):
+    require_r2()
+    user_id = parse_uuid(user_id, "user_id")
+    patient_id = parse_uuid(patient_id, "patient_id")
+
+    client = r2_storage.r2_client()
+    meta_key = r2_storage.patient_metadata_key(user_id, patient_id)
+    try:
+        meta = r2_storage.get_json(client, meta_key)
+        return meta
+    except FileNotFoundError:
+        # Fallback to get_patient_metadata for older records
+        item = r2_storage.build_patient_list_item(client, user_id, patient_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="Metadata not found.")
+        return item
+
+
 @app.get("/extractions/{user_id}/{patient_id}/discharge-summary.docx")
 def get_discharge_summary_docx(user_id: str, patient_id: str):
     require_r2()
@@ -181,7 +218,9 @@ def get_discharge_summary_docx(user_id: str, patient_id: str):
 
     client = r2_storage.r2_client()
     docx_key = r2_storage.discharge_summary_docx_key(user_id, patient_id)
+    meta_key = r2_storage.patient_metadata_key(user_id, patient_id)
     json_key = r2_storage.extraction_json_key(user_id, patient_id)
+    summary_md_key = r2_storage.discharge_summary_md_key(user_id, patient_id)
 
     try:
         docx_bytes, _ = r2_storage.get_bytes(client, docx_key)
@@ -189,11 +228,26 @@ def get_discharge_summary_docx(user_id: str, patient_id: str):
         raise HTTPException(status_code=404, detail="Discharge summary DOCX not found.") from exc
 
     filename = "discharge-summary.docx"
+    # 1. Try reading patient_name from metadata.json
     try:
-        context = r2_storage.get_json(client, json_key)
-        filename = docx_filename(context.get("patient_name", ""))
+        meta = r2_storage.get_json(client, meta_key)
+        if meta.get("patient_name"):
+            filename = docx_filename(meta["patient_name"])
     except FileNotFoundError:
-        pass
+        # 2. Try reading patient_name from context.json
+        try:
+            context = r2_storage.get_json(client, json_key)
+            if context.get("patient_name"):
+                filename = docx_filename(context["patient_name"])
+        except FileNotFoundError:
+            # 3. Fallback to parsing from discharge-summary.md
+            try:
+                summary_text = r2_storage.get_text(client, summary_md_key)
+                parsed_meta = parse_patient_metadata_from_md(summary_text)
+                if parsed_meta.get("patient_name"):
+                    filename = docx_filename(parsed_meta["patient_name"])
+            except FileNotFoundError:
+                pass
 
     return Response(
         content=docx_bytes,
@@ -207,6 +261,7 @@ async def extract_images(
     user_id: str = Form(...),
     files: list[UploadFile] = File(...),
     patient_id: Optional[str] = Form(None),
+    discharge_type: str = Form("standard"),
 ):
     require_r2()
     require_gemini()
@@ -230,26 +285,39 @@ async def extract_images(
                 raise HTTPException(status_code=400, detail=f"Empty image file: {filename}")
             image_items.append((filename, content))
 
-        markdown, context = run_extraction_pipeline(image_items)
-        docx_bytes = render_discharge_summary_from_template(context)
+        result = run_extraction_pipeline(image_items, discharge_type=discharge_type)
 
         client = r2_storage.r2_client()
         md_key = r2_storage.extraction_key(user_id, patient_id)
-        json_key = r2_storage.extraction_json_key(user_id, patient_id)
         docx_key = r2_storage.discharge_summary_docx_key(user_id, patient_id)
+        meta_key = r2_storage.patient_metadata_key(user_id, patient_id)
 
-        r2_storage.put_text(client, md_key, markdown)
-        r2_storage.put_json(client, json_key, context)
+        # 1. Store raw OCR markdown context
+        r2_storage.put_text(client, md_key, result.context_md)
+
+        # 2. Store flow-specific artifacts
+        if result.discharge_type == "custom" and result.context_json:
+            json_key = r2_storage.extraction_json_key(user_id, patient_id)
+            r2_storage.put_json(client, json_key, result.context_json)
+        elif result.discharge_type == "standard" and result.summary_md:
+            summary_md_key = r2_storage.discharge_summary_md_key(user_id, patient_id)
+            r2_storage.put_text(client, summary_md_key, result.summary_md)
+
+        # 3. Store unified metadata.json for fast dashboard indexing
+        if result.metadata:
+            r2_storage.put_json(client, meta_key, result.metadata)
+
+        # 4. Store generated DOCX
         r2_storage.put_bytes(
             client,
             docx_key,
-            docx_bytes,
+            result.docx_bytes,
             content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         )
 
-        filename = docx_filename(context.get("patient_name", ""))
+        filename = docx_filename(result.patient_name)
         return Response(
-            content=docx_bytes,
+            content=result.docx_bytes,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             headers={
                 "Content-Disposition": f'attachment; filename="{filename}"',
@@ -262,6 +330,7 @@ async def extract_images(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
 
 
 @app.post("/convert/docx-to-pdf")

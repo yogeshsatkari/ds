@@ -43,8 +43,16 @@ def extraction_json_key(user_id: str, patient_id: str) -> str:
     return f"{extraction_prefix(user_id, patient_id)}/context.json"
 
 
+def discharge_summary_md_key(user_id: str, patient_id: str) -> str:
+    return f"{extraction_prefix(user_id, patient_id)}/discharge-summary.md"
+
+
 def discharge_summary_docx_key(user_id: str, patient_id: str) -> str:
     return f"{extraction_prefix(user_id, patient_id)}/discharge-summary.docx"
+
+
+def patient_metadata_key(user_id: str, patient_id: str) -> str:
+    return f"{extraction_prefix(user_id, patient_id)}/metadata.json"
 
 
 def user_patients_prefix(user_id: str) -> str:
@@ -73,11 +81,17 @@ def head_object_last_modified(client, key: str) -> Optional[str]:
 
 def build_patient_list_item(client, user_id: str, patient_id: str) -> Optional[dict]:
     docx_key = discharge_summary_docx_key(user_id, patient_id)
+    meta_key = patient_metadata_key(user_id, patient_id)
+    summary_md_key = discharge_summary_md_key(user_id, patient_id)
     json_key = extraction_json_key(user_id, patient_id)
     md_key = extraction_key(user_id, patient_id)
 
     updated_at = head_object_last_modified(client, docx_key)
     has_summary = updated_at is not None
+    if not updated_at:
+        updated_at = head_object_last_modified(client, meta_key)
+    if not updated_at:
+        updated_at = head_object_last_modified(client, summary_md_key)
     if not updated_at:
         updated_at = head_object_last_modified(client, json_key)
     if not updated_at:
@@ -96,6 +110,26 @@ def build_patient_list_item(client, user_id: str, patient_id: str) -> Optional[d
         "updated_at": updated_at,
         "has_summary": has_summary,
     }
+
+    # 1. Try unified metadata.json first (Standardized for both flows)
+    try:
+        meta = get_json(client, meta_key)
+        for field in (
+            "patient_name",
+            "age",
+            "sex",
+            "uhid_no",
+            "date_of_admission",
+            "date_of_discharge",
+        ):
+            item[field] = str(meta.get(field, "") or "").strip()
+        if "discharge_type" in meta:
+            item["discharge_type"] = meta["discharge_type"]
+        return item
+    except FileNotFoundError:
+        pass
+
+    # 2. Backward compatibility: Try context.json (Custom flow)
     try:
         context = get_json(client, json_key)
         for field in (
@@ -106,10 +140,35 @@ def build_patient_list_item(client, user_id: str, patient_id: str) -> Optional[d
             "date_of_admission",
             "date_of_discharge",
         ):
-            item[field] = str(context.get(field, "") or "")
+            item[field] = str(context.get(field, "") or "").strip()
+        item["discharge_type"] = "custom"
+        return item
     except FileNotFoundError:
         pass
+
+    # 3. Backward compatibility: Try discharge-summary.md (Standard flow)
+    try:
+        from discharge_types.standard_md_to_docx.render import parse_patient_metadata_from_md
+        summary_text = get_text(client, summary_md_key)
+
+        meta = parse_patient_metadata_from_md(summary_text)
+        for field in (
+            "patient_name",
+            "age",
+            "sex",
+            "uhid_no",
+            "date_of_admission",
+            "date_of_discharge",
+        ):
+            item[field] = str(meta.get(field, "") or "").strip()
+        item["discharge_type"] = "standard"
+        return item
+    except FileNotFoundError:
+        pass
+
     return item
+
+
 
 
 def list_user_patients(client, user_id: str) -> list[dict]:
