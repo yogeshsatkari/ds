@@ -77,6 +77,32 @@ def default_ocr_thinking_budget() -> int:
     return config.GEMINI_OCR_THINKING_BUDGET
 
 
+def clinical_safety_settings() -> list[types.SafetySetting]:
+    """Disables false-positive safety blocking for clinical records (medications, trauma, diagnoses)."""
+    return [
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+    ]
+
+
 def calculate_cost(prompt_tokens: int, billed_output_tokens: int) -> tuple[float, float]:
     return config.calculate_token_cost(prompt_tokens, billed_output_tokens)
 
@@ -94,15 +120,21 @@ def extract_page_context(
         thinking_budget = default_ocr_thinking_budget()
 
     prompt = f"""
-You are a Medical Record Digitization Specialist. Your task is to extract ALL information from this patient record image ({filename}, Page {page_num} of {total_pages}) with strict factual accuracy.
+🚨 HIGHEST PRIORITY DIRECTIVE (OVERRULES ALL OTHER RULES):
+DO NOT OVERTHINK HANDWRITTEN NOTES.
+Do not spend excessive reasoning cycles deliberating over cursive doctor handwriting.
+Perform a swift line-by-line transcription:
+- For handwritten clinical notes, transcribe all visible clinical text, medications, and progress notes line by line.
+- If a word, drug, or dosage is ambiguous, immediately transcribe the closest phonetic reading followed by [verify] (e.g., 'Levetiracetam 1g BD [verify]', '15/10/2026 [verify]').
+- If completely illegible, write '[illegible]' and move to the next word. Do not stall or leave the page empty.
+- Do NOT omit or skip handwritten pages or bedside progress notes. Transcribe every readable section, heading, and clinical note.
 
 CORE EXTRACTION & SAFETY RULES:
-1. Handling Ambiguity:
-   - If ANY word, number, dosage, lab unit, or date is illegible, blurry, or ambiguous, write '[verify]' (e.g., 'Levetiracetam 1g BD [verify]', '15/10/2026 [verify]').
-   - Never invent, extrapolate, or guess unreadable content.
+1. Handling Ambiguity in Printed Content:
+   - For printed labs, vitals, and dates, preserve exact values. Do not extrapolate printed numbers; if printed text is smudged or blurry, write '[verify]'.
 
 2. Chronological & Date Sanity:
-   - Identify the primary admission timeline from printed forms, lab timestamps, and registration stamps.
+   - Identify the primary admission timeline from printed forms, lab timestamps, and registration stamps when available.
    - For handwritten notes and bedside charts, ensure transcribed dates match the active admission timeframe rather than misinterpreting cursive digits as unrelated years.
    - If a handwritten date is ambiguous, transcribe your best reading followed by '[verify]' (e.g., '29/09/2026 [verify]').
 
@@ -112,7 +144,8 @@ CORE EXTRACTION & SAFETY RULES:
 
 4. Structure:
    - Output structured Markdown.
-   - Format vitals, labs, and medication administration sheets as clear Markdown tables.
+   - Format vitals, labs, and medication administration sheets as clear Markdown tables when applicable.
+   - For narrative doctor notes or progress sheets, transcribe as clean line-by-line bullet points or sections.
    - Explicitly preserve checkbox states as '[X]' or '[ ]'.
 
 Return ONLY the structured Markdown for this page.
@@ -125,6 +158,7 @@ Return ONLY the structured Markdown for this page.
             config = types.GenerateContentConfig(
                 temperature=0.1,
                 thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
+                safety_settings=clinical_safety_settings(),
             )
             response = client.models.generate_content(
                 model=model_name(),
@@ -133,6 +167,10 @@ Return ONLY the structured Markdown for this page.
             )
             duration = time.time() - start_time
             extracted_text = (response.text or "").strip()
+            if not extracted_text and attempt < max_retries:
+                # If Gemini returned empty text, trigger a retry attempt
+                raise RuntimeError(f"Gemini returned empty text for {filename} (Page {page_num}). Retrying...")
+
             page_text = (
                 f"# PAGE {page_num}: {filename}\n\n"
                 f"{extracted_text}\n\n"
@@ -290,6 +328,7 @@ def generate_json(
                 response_mime_type="application/json",
                 response_schema=schema,
                 thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
+                safety_settings=clinical_safety_settings(),
             )
             response = client.models.generate_content(
                 model=model_name(),

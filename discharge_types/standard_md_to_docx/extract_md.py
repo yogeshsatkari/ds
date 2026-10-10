@@ -123,6 +123,7 @@ def extract_discharge_summary_md_from_markdown(
             config = types.GenerateContentConfig(
                 temperature=0.1,
                 thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
+                safety_settings=gemini_service.clinical_safety_settings(),
             )
             response = client.models.generate_content(
                 model=gemini_service.model_name(),
