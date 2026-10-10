@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 import gemini_service
 import r2_storage
 from discharge_types.standard_md_to_docx.render import parse_patient_metadata_from_md
-from pipeline.extraction_pipeline import run_extraction_pipeline
+from pipeline.extraction_pipeline import run_extraction_pipeline, ExtractionPipelineError
 
 
 load_dotenv()
@@ -32,7 +32,12 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Patient-Id"],
+    expose_headers=[
+        "X-Patient-Id",
+        "X-Total-Duration-Seconds",
+        "X-Total-Cost-INR",
+        "X-Total-Tokens",
+    ],
 )
 
 
@@ -117,6 +122,8 @@ def root():
         "<li><code>GET /extractions/{user_id}/{patient_id}/context.md</code> — fetch stored raw OCR markdown</li>"
         "<li><code>GET /extractions/{user_id}/{patient_id}/discharge-summary.md</code> — fetch stored standard markdown</li>"
         "<li><code>GET /extractions/{user_id}/{patient_id}/context.json</code> — fetch stored context JSON</li>"
+        "<li><code>GET /extractions/{user_id}/{patient_id}/metadata.json</code> — fetch stored patient metadata</li>"
+        "<li><code>GET /extractions/{user_id}/{patient_id}/metrics.json</code> — fetch performance & AI cost metrics</li>"
         "<li><code>GET /extractions/{user_id}/{patient_id}/discharge-summary.docx</code> — fetch stored discharge summary DOCX</li>"
         "<li><code>POST /convert/docx-to-pdf</code> — convert DOCX to PDF</li>"
         "</ul>"
@@ -208,6 +215,21 @@ def get_extraction_metadata(user_id: str, patient_id: str):
         if not item:
             raise HTTPException(status_code=404, detail="Metadata not found.")
         return item
+
+
+@app.get("/extractions/{user_id}/{patient_id}/metrics.json")
+def get_extraction_metrics(user_id: str, patient_id: str):
+    require_r2()
+    user_id = parse_uuid(user_id, "user_id")
+    patient_id = parse_uuid(patient_id, "patient_id")
+
+    client = r2_storage.r2_client()
+    metrics_key = r2_storage.extraction_metrics_key(user_id, patient_id)
+    try:
+        metrics = r2_storage.get_json(client, metrics_key)
+        return metrics
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Metrics not found.") from exc
 
 
 @app.get("/extractions/{user_id}/{patient_id}/discharge-summary.docx")
@@ -326,14 +348,36 @@ async def extract_images(
             content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         )
 
+        # 5. Store AI performance and cost metrics
+        if result.metrics:
+            metrics_key = r2_storage.extraction_metrics_key(user_id, patient_id)
+            r2_storage.put_json(client, metrics_key, result.metrics)
+
         filename = docx_filename(result.patient_name)
+        summary_meta = result.metrics.get("summary", {}) if result.metrics else {}
         return Response(
             content=result.docx_bytes,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             headers={
                 "Content-Disposition": f'attachment; filename="{filename}"',
                 "X-Patient-Id": patient_id,
+                "X-Total-Duration-Seconds": str(summary_meta.get("total_duration_seconds", "")),
+                "X-Total-Cost-INR": str(summary_meta.get("total_cost_inr", "")),
+                "X-Total-Tokens": str(summary_meta.get("total_tokens", "")),
             },
+        )
+    except ExtractionPipelineError as exc:
+        client = r2_storage.r2_client()
+        if exc.partial_context_md:
+            md_key = r2_storage.extraction_key(user_id, patient_id)
+            r2_storage.put_text(client, md_key, exc.partial_context_md)
+        if exc.metrics:
+            metrics_key = r2_storage.extraction_metrics_key(user_id, patient_id)
+            r2_storage.put_json(client, metrics_key, exc.metrics)
+        raise HTTPException(
+            status_code=500,
+            detail=f"{exc}. Partial token spend recorded in metrics.json (Patient ID: {patient_id})",
+            headers={"X-Patient-Id": patient_id},
         )
     except HTTPException:
         raise

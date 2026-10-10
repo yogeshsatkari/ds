@@ -55,6 +55,10 @@ def patient_metadata_key(user_id: str, patient_id: str) -> str:
     return f"{extraction_prefix(user_id, patient_id)}/metadata.json"
 
 
+def extraction_metrics_key(user_id: str, patient_id: str) -> str:
+    return f"{extraction_prefix(user_id, patient_id)}/metrics.json"
+
+
 def user_patients_prefix(user_id: str) -> str:
     return f"users/{user_id}/patients/"
 

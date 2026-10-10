@@ -118,7 +118,7 @@ def extract_context_from_markdown(
     *,
     sample: dict | None = None,
     schema: dict | None = None,
-) -> dict:
+) -> tuple[dict, dict]:
     clinical_text = clinical_text.strip()
     if not clinical_text:
         raise ValueError("Clinical context markdown is empty.")
@@ -126,9 +126,11 @@ def extract_context_from_markdown(
     sample = sample or load_sample()
     schema = schema or load_schema()
     prompt = build_prompt(clinical_text, sample, schema)
-    context = normalize_context(gemini_service.generate_json(prompt, schema))
+
+    raw_json, metrics = gemini_service.generate_json(prompt, schema)
+    context = normalize_context(raw_json)
     validate_context(context)
-    return context
+    return context, metrics
 
 
 extract_json_context_from_markdown = extract_context_from_markdown
@@ -145,7 +147,7 @@ def extract_context_json(
         raise FileNotFoundError(f"Missing clinical context: {context_md_path}")
 
     sample = load_sample(sample_path)
-    context = extract_context_from_markdown(
+    context, _ = extract_context_from_markdown(
         context_md_path.read_text(encoding="utf-8"),
         sample=sample,
     )
