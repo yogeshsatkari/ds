@@ -77,6 +77,14 @@ def default_ocr_thinking_budget() -> int:
     return config.GEMINI_OCR_THINKING_BUDGET
 
 
+def default_ocr_max_output_tokens() -> int:
+    return config.GEMINI_OCR_MAX_OUTPUT_TOKENS
+
+
+def default_ocr_page_timeout_ms() -> int:
+    return config.GEMINI_OCR_PAGE_TIMEOUT_MS
+
+
 def clinical_safety_settings() -> list[types.SafetySetting]:
     """Disables false-positive safety blocking for clinical records (medications, trauma, diagnoses)."""
     return [
@@ -113,11 +121,16 @@ def extract_page_context(
     filename: str,
     page_num: int,
     total_pages: int,
-    max_retries: int = 4,
     thinking_budget: Optional[int] = None,
+    max_output_tokens: Optional[int] = None,
+    timeout_ms: Optional[int] = None,
 ) -> tuple[str, dict]:
     if thinking_budget is None:
         thinking_budget = default_ocr_thinking_budget()
+    if max_output_tokens is None:
+        max_output_tokens = default_ocr_max_output_tokens()
+    if timeout_ms is None:
+        timeout_ms = default_ocr_page_timeout_ms()
 
     prompt = f"""
 🚨 HIGHEST PRIORITY DIRECTIVE (OVERRULES ALL OTHER RULES):
@@ -126,8 +139,9 @@ Do not spend excessive reasoning cycles deliberating over cursive doctor handwri
 Perform a swift line-by-line transcription:
 - For handwritten clinical notes, transcribe all visible clinical text, medications, and progress notes line by line.
 - If a word, drug, or dosage is ambiguous, immediately transcribe the closest phonetic reading followed by [verify] (e.g., 'Levetiracetam 1g BD [verify]', '15/10/2026 [verify]').
-- If completely illegible, write '[illegible]' and move to the next word. Do not stall or leave the page empty.
-- Do NOT omit or skip handwritten pages or bedside progress notes. Transcribe every readable section, heading, and clinical note.
+- If completely illegible, write '[illegible]' and move to the next word.
+- If a page is blank, or only a divider sheet, or contains no readable clinical text, simply output '[illegible]' and finish. Never repeat tokens or lines in a loop.
+- Do NOT omit visible handwritten clinical notes or bedside progress sheets. Transcribe every readable section, heading, and clinical note.
 
 CORE EXTRACTION & SAFETY RULES:
 1. Handling Ambiguity in Printed Content:
@@ -151,56 +165,45 @@ CORE EXTRACTION & SAFETY RULES:
 Return ONLY the structured Markdown for this page.
 """
 
-    last_error: BaseException = RuntimeError("Extraction failed without raising a specific exception")
     start_time = time.time()
-    for attempt in range(1, max_retries + 1):
-        try:
-            config = types.GenerateContentConfig(
-                temperature=0.1,
-                thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
-                safety_settings=clinical_safety_settings(),
-            )
-            response = client.models.generate_content(
-                model=model_name(),
-                contents=[image, prompt],
-                config=config,
-            )
-            duration = time.time() - start_time
-            extracted_text = (response.text or "").strip()
-            if not extracted_text and attempt < max_retries:
-                # If Gemini returned empty text, trigger a retry attempt
-                raise RuntimeError(f"Gemini returned empty text for {filename} (Page {page_num}). Retrying...")
+    config = types.GenerateContentConfig(
+        temperature=0.1,
+        max_output_tokens=max_output_tokens,
+        http_options=types.HttpOptions(timeout=timeout_ms),
+        thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
+        safety_settings=clinical_safety_settings(),
+    )
+    response = client.models.generate_content(
+        model=model_name(),
+        contents=[image, prompt],
+        config=config,
+    )
+    duration = time.time() - start_time
+    extracted_text = (response.text or "").strip()
+    if not extracted_text:
+        raise RuntimeError(f"Gemini returned empty text for {filename} (Page {page_num}).")
 
-            page_text = (
-                f"# PAGE {page_num}: {filename}\n\n"
-                f"{extracted_text}\n\n"
-                "---\n"
-            )
+    page_text = (
+        f"# PAGE {page_num}: {filename}\n\n"
+        f"{extracted_text}\n\n"
+        "---\n"
+    )
 
-            usage = getattr(response, "usage_metadata", None)
-            prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
-            visible_tokens = getattr(usage, "candidates_token_count", 0) or 0
-            thought_tokens = getattr(usage, "thoughts_token_count", 0) or 0
+    usage = getattr(response, "usage_metadata", None)
+    prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
+    visible_tokens = getattr(usage, "candidates_token_count", 0) or 0
+    thought_tokens = getattr(usage, "thoughts_token_count", 0) or 0
 
-            page_metrics = metrics_lib.make_successful_page_metrics(
-                page_num=page_num,
-                filename=filename,
-                prompt_tokens=prompt_tokens,
-                visible_tokens=visible_tokens,
-                thought_tokens=thought_tokens,
-                duration_seconds=duration,
-                attempts=attempt,
-            )
-            return page_text, page_metrics
-        except Exception as exc:
-            last_error = exc
-            err_str = str(exc)
-            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "getaddrinfo" in err_str:
-                time.sleep(6 * attempt)
-            elif attempt < max_retries:
-                time.sleep(3)
-
-    raise last_error
+    page_metrics = metrics_lib.make_successful_page_metrics(
+        page_num=page_num,
+        filename=filename,
+        prompt_tokens=prompt_tokens,
+        visible_tokens=visible_tokens,
+        thought_tokens=thought_tokens,
+        duration_seconds=duration,
+        attempts=1,
+    )
+    return page_text, page_metrics
 
 
 def _process_single_page(
@@ -224,14 +227,14 @@ def _process_single_page(
     except Exception as exc:
         fallback_text = (
             f"# PAGE {idx}: {filename}\n\n"
-            f"> Error processing page '{filename}': {exc}\n\n"
+            f"> Note: Could not extract content from page '{filename}': {exc}\n\n"
             "---\n"
         )
         fallback_metrics = metrics_lib.make_failed_page_metrics(
             page_num=idx,
             filename=filename,
             error=str(exc),
-            attempts=4,
+            attempts=1,
             duration_seconds=time.time() - start_time,
         )
         return (idx, fallback_text, fallback_metrics)
