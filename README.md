@@ -1,6 +1,10 @@
-
+## Health Monitoring
 * Github action is not working as expected, it is pinging the health endpoint very late so we are also using cron-job.org for the same purpose.
-* Automated background keep-awake pings via cron-job.org scheduled every 12 minutes during India daytime hours (7:00 AM - 2:00 AM IST).
+* Automated availability checks hit `GET /health` during active hours (02:00–16:59 UTC) across two staggered schedules:
+
+* **Monitor 1:** `3,28,54 2-16 * * *`
+* **Monitor 2:** `16,41 2-16 * * *`
+
 
 
 ## Cloudflare R2 Storage Pricing
