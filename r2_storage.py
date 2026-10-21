@@ -191,9 +191,31 @@ def list_user_patients(client, user_id: str) -> list[dict]:
     for patient_id in list_patient_ids(client, user_id):
         item = build_patient_list_item(client, user_id, patient_id)
         if item:
+            item["user_id"] = user_id
             items.append(item)
     items.sort(key=lambda row: row["updated_at"], reverse=True)
     return items
+
+
+def list_all_user_ids(client) -> list[str]:
+    prefix = "users/"
+    user_ids: list[str] = []
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket(), Prefix=prefix, Delimiter="/"):
+        for common_prefix in page.get("CommonPrefixes", []):
+            suffix = common_prefix["Prefix"][len(prefix) :].rstrip("/")
+            if suffix:
+                user_ids.append(suffix)
+    return user_ids
+
+
+def list_all_patients(client) -> list[dict]:
+    all_patients: list[dict] = []
+    for uid in list_all_user_ids(client):
+        all_patients.extend(list_user_patients(client, uid))
+    all_patients.sort(key=lambda row: row.get("updated_at") or "", reverse=True)
+    return all_patients
+
 
 
 def put_text(client, key: str, text: str) -> None:

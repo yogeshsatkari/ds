@@ -141,6 +141,14 @@ def health_check():
     }
 
 
+@app.get("/dashboard/patients")
+def list_dashboard_patients():
+    require_r2()
+    client = r2_storage.r2_client()
+    patients = r2_storage.list_all_patients(client)
+    return {"patients": patients}
+
+
 @app.get("/users/{user_id}/patients")
 def list_patients(user_id: str):
     require_r2()
