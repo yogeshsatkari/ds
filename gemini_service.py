@@ -7,7 +7,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
-from PIL import Image
+from PIL import Image, ImageOps
 import pypdfium2 as pdfium
 from google import genai
 from google.genai import types
@@ -32,6 +32,22 @@ def validate_document_filename(filename: str) -> None:
     ext = os.path.splitext(filename.lower())[1]
     if ext not in ALLOWED_DOCUMENT_EXTENSIONS:
         raise ValueError(f"Unsupported file type: {filename}")
+
+
+def normalize_image(content: bytes, max_dim: int = 2048) -> Image.Image:
+    """
+    Normalizes mobile/scanner photos:
+    1. EXIF auto-orientation (handles upside-down or sideways smartphone camera photos).
+    2. Converts color mode to standard RGB (handles RGBA, P, L, CMYK).
+    3. Smart downscaling to max_dim (preserves OCR legibility while reducing transfer size and latency).
+    """
+    img = Image.open(BytesIO(content))
+    img = ImageOps.exif_transpose(img) or img
+    if img.mode in ("RGBA", "P", "L", "CMYK"):
+        img = img.convert("RGB")
+    if max(img.size) > max_dim:
+        img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+    return img
 
 
 def pdf_to_page_images(
@@ -215,9 +231,7 @@ def _process_single_page(
     thinking_budget: Optional[int] = None,
 ) -> tuple[int, str, dict]:
     validate_document_filename(filename)
-    image = Image.open(BytesIO(content))
-    if image.mode in ("RGBA", "P"):
-        image = image.convert("RGB")
+    image = normalize_image(content)
     start_time = time.time()
     try:
         page_text, page_metrics = extract_page_context(

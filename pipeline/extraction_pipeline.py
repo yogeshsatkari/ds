@@ -4,11 +4,9 @@ from typing import Optional
 
 import gemini_service
 import metrics as metrics_lib
-from discharge_types.custom_data_to_docx.extract_json import extract_json_context_from_markdown
-from discharge_types.custom_data_to_docx.render import render_discharge_summary_from_template
-from discharge_types.standard_md_to_docx.extract_md import extract_discharge_summary_md_from_markdown
-from discharge_types.standard_md_to_docx.render import convert_markdown_to_docx_bytes, parse_patient_metadata_from_md
-
+from context_to_discharge.extract import synthesize_discharge_summary
+from context_to_discharge.render import convert_markdown_to_docx_bytes, parse_patient_metadata_from_md
+from context_to_discharge.template_parser import parse_template_to_markdown
 
 
 class ExtractionPipelineError(Exception):
@@ -30,18 +28,23 @@ class ExtractionResult:
     context_md: str
     docx_bytes: bytes
     discharge_type: str
-    context_json: Optional[dict] = None
-    summary_md: Optional[str] = None
+    summary_md: str
     patient_name: str = ""
     metadata: Optional[dict] = None
     metrics: Optional[dict] = None
+    template_md: Optional[str] = None
 
 
 def run_extraction_pipeline(
     image_items: list[tuple[str, bytes]],
+    template_items: Optional[list[tuple[str, bytes]]] = None,
     discharge_type: str = "standard",
 ) -> ExtractionResult:
-    """Executes clinical OCR and generates DOCX based on discharge_type ('standard' or 'custom')."""
+    """
+    Executes clinical OCR and synthesizes a discharge summary DOCX.
+    - If template_items is provided: extracts the custom template into Markdown and guides synthesis.
+    - If template_items is empty/None: uses the institutional standardized discharge template.
+    """
     pipeline_start = time.time()
     discharge_type_norm = (discharge_type or "standard").strip().lower()
 
@@ -66,41 +69,42 @@ def run_extraction_pipeline(
             partial_context_md=context_md,
         )
 
-    # 2. Stage 2: Synthesis
+    # 2. Ingest Template (Stage 1b - if provided)
+    template_md: Optional[str] = None
+    template_metrics: Optional[dict] = None
+
+    if template_items:
+        try:
+            template_md, template_metrics = parse_template_to_markdown(template_items)
+            discharge_type_norm = "custom"
+        except Exception as tmpl_exc:
+            # If template parsing encounters an issue, log and fall back to standard
+            template_md = None
+            template_metrics = {"status": "failed", "error": str(tmpl_exc)}
+            discharge_type_norm = "standard"
+    elif discharge_type_norm == "custom":
+        # Doctor selected custom but provided no template files -> gracefully fall back to standard
+        discharge_type_norm = "standard"
+
+    # 3. Stage 2: Synthesis & Direct Word Document Rendering
     try:
-        if discharge_type_norm == "custom":
-            # Custom Flow: Markdown -> Structured JSON -> ds-template.docx
-            context_json, synthesis_metrics = extract_json_context_from_markdown(context_md)
-            docx_bytes = render_discharge_summary_from_template(context_json)
-            patient_name = (context_json.get("patient_name") or "").strip()
+        summary_md, synthesis_metrics = synthesize_discharge_summary(
+            clinical_text=context_md,
+            template_md=template_md,
+        )
+        docx_bytes = convert_markdown_to_docx_bytes(summary_md)
+        meta = parse_patient_metadata_from_md(summary_md)
+        patient_name = (meta.get("patient_name") or "").strip()
 
-            metadata = {
-                "patient_name": patient_name,
-                "age": str(context_json.get("age") or "").strip(),
-                "sex": str(context_json.get("sex") or "").strip(),
-                "uhid_no": str(context_json.get("uhid_no") or "").strip(),
-                "date_of_admission": str(context_json.get("date_of_admission") or "").strip(),
-                "date_of_discharge": str(context_json.get("date_of_discharge") or "").strip(),
-                "discharge_type": "custom",
-            }
-            summary_md = None
-        else:
-            # Standard Flow: Markdown -> discharge-summary.md -> direct Word document
-            summary_md, synthesis_metrics = extract_discharge_summary_md_from_markdown(context_md)
-            docx_bytes = convert_markdown_to_docx_bytes(summary_md)
-            meta = parse_patient_metadata_from_md(summary_md)
-            patient_name = (meta.get("patient_name") or "").strip()
-
-            metadata = {
-                "patient_name": patient_name,
-                "age": str(meta.get("age") or "").strip(),
-                "sex": str(meta.get("sex") or "").strip(),
-                "uhid_no": str(meta.get("uhid_no") or "").strip(),
-                "date_of_admission": str(meta.get("date_of_admission") or "").strip(),
-                "date_of_discharge": str(meta.get("date_of_discharge") or "").strip(),
-                "discharge_type": "standard",
-            }
-            context_json = None
+        metadata = {
+            "patient_name": patient_name,
+            "age": str(meta.get("age") or "").strip(),
+            "sex": str(meta.get("sex") or "").strip(),
+            "uhid_no": str(meta.get("uhid_no") or "").strip(),
+            "date_of_admission": str(meta.get("date_of_admission") or "").strip(),
+            "date_of_discharge": str(meta.get("date_of_discharge") or "").strip(),
+            "discharge_type": discharge_type_norm,
+        }
     except Exception as stage2_exc:
         pipeline_duration = time.time() - pipeline_start
         synthesis_failed_metrics = metrics_lib.make_failed_synthesis_metrics(
@@ -111,6 +115,7 @@ def run_extraction_pipeline(
             discharge_type=discharge_type_norm,
             stage_1_ocr=ocr_metrics,
             stage_2_synthesis=synthesis_failed_metrics,
+            stage_template_extraction=template_metrics,
             total_duration_seconds=pipeline_duration,
             overall_status="failed",
             error=f"Stage 2 synthesis failed: {stage2_exc}",
@@ -123,12 +128,13 @@ def run_extraction_pipeline(
             partial_context_md=context_md,
         ) from stage2_exc
 
-    # 3. Overall Pipeline Success
+    # 4. Overall Pipeline Success
     pipeline_duration = time.time() - pipeline_start
     metrics = metrics_lib.build_pipeline_metrics(
         discharge_type=discharge_type_norm,
         stage_1_ocr=ocr_metrics,
         stage_2_synthesis=synthesis_metrics,
+        stage_template_extraction=template_metrics,
         total_duration_seconds=pipeline_duration,
         overall_status="completed",
         model=gemini_service.model_name(),
@@ -138,10 +144,9 @@ def run_extraction_pipeline(
         context_md=context_md,
         docx_bytes=docx_bytes,
         discharge_type=discharge_type_norm,
-        context_json=context_json,
         summary_md=summary_md,
         patient_name=patient_name,
         metadata=metadata,
         metrics=metrics,
+        template_md=template_md,
     )
-

@@ -189,6 +189,7 @@ def build_pipeline_metrics(
     discharge_type: str,
     stage_1_ocr: dict,
     stage_2_synthesis: Optional[dict] = None,
+    stage_template_extraction: Optional[dict] = None,
     total_duration_seconds: float = 0.0,
     overall_status: str = "completed",
     error: Optional[str] = None,
@@ -197,18 +198,21 @@ def build_pipeline_metrics(
 ) -> dict:
     """Reusable template assembling overall pipeline metrics from stage metrics."""
     synthesis = stage_2_synthesis or {}
+    tmpl = stage_template_extraction or {}
 
-    total_prompt = stage_1_ocr.get("prompt_tokens", 0) + synthesis.get("prompt_tokens", 0)
-    total_visible = stage_1_ocr.get("visible_tokens", 0) + synthesis.get("visible_tokens", 0)
-    total_thought = stage_1_ocr.get("thought_tokens", 0) + synthesis.get("thought_tokens", 0)
-    total_billed = stage_1_ocr.get("billed_output_tokens", 0) + synthesis.get("billed_output_tokens", 0)
-    total_tokens = stage_1_ocr.get("total_tokens", 0) + synthesis.get("total_tokens", 0)
-    total_usd = round(stage_1_ocr.get("cost_usd", 0.0) + synthesis.get("cost_usd", 0.0), 6)
-    total_inr = round(stage_1_ocr.get("cost_inr", 0.0) + synthesis.get("cost_inr", 0.0), 4)
+    total_prompt = stage_1_ocr.get("prompt_tokens", 0) + synthesis.get("prompt_tokens", 0) + tmpl.get("prompt_tokens", 0)
+    total_visible = stage_1_ocr.get("visible_tokens", 0) + synthesis.get("visible_tokens", 0) + tmpl.get("visible_tokens", 0)
+    total_thought = stage_1_ocr.get("thought_tokens", 0) + synthesis.get("thought_tokens", 0) + tmpl.get("thought_tokens", 0)
+    total_billed = stage_1_ocr.get("billed_output_tokens", 0) + synthesis.get("billed_output_tokens", 0) + tmpl.get("output_tokens", 0)
+    total_tokens = stage_1_ocr.get("total_tokens", 0) + synthesis.get("total_tokens", 0) + tmpl.get("total_tokens", 0)
+    total_usd = round(stage_1_ocr.get("cost_usd", 0.0) + synthesis.get("cost_usd", 0.0) + tmpl.get("cost_usd", 0.0), 6)
+    total_inr = round(stage_1_ocr.get("cost_inr", 0.0) + synthesis.get("cost_inr", 0.0) + tmpl.get("cost_inr", 0.0), 4)
 
     successful_stages = []
     if stage_1_ocr.get("status") in ("completed", "partial_success"):
         successful_stages.append("stage_1_ocr")
+    if stage_template_extraction:
+        successful_stages.append("stage_template_extraction")
     if synthesis.get("status") == "success":
         successful_stages.append("stage_2_synthesis")
 
@@ -228,6 +232,8 @@ def build_pipeline_metrics(
     )
 
     stages_dict = {"stage_1_ocr": stage_1_ocr}
+    if stage_template_extraction is not None:
+        stages_dict["stage_template_extraction"] = stage_template_extraction
     if stage_2_synthesis is not None:
         stages_dict["stage_2_synthesis"] = stage_2_synthesis
 

@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 import gemini_service
 import r2_storage
-from discharge_types.standard_md_to_docx.render import parse_patient_metadata_from_md
+from context_to_discharge.render import parse_patient_metadata_from_md
 from pipeline.extraction_pipeline import run_extraction_pipeline, ExtractionPipelineError
 
 
@@ -121,7 +121,8 @@ def root():
         "<li><code>GET /users/{user_id}/patients</code> — list past patients for a user</li>"
         "<li><code>GET /extractions/{user_id}/{patient_id}/context.md</code> — fetch stored raw OCR markdown</li>"
         "<li><code>GET /extractions/{user_id}/{patient_id}/discharge-summary.md</code> — fetch stored standard markdown</li>"
-        "<li><code>GET /extractions/{user_id}/{patient_id}/context.json</code> — fetch stored context JSON</li>"
+        "<li><code>GET /extractions/{user_id}/{patient_id}/template.md</code> — fetch stored template markdown (if custom template provided)</li>"
+        "<li><code>GET /extractions/{user_id}/{patient_id}/context.json</code> — fetch stored context JSON (legacy)</li>"
         "<li><code>GET /extractions/{user_id}/{patient_id}/metadata.json</code> — fetch stored patient metadata</li>"
         "<li><code>GET /extractions/{user_id}/{patient_id}/metrics.json</code> — fetch performance & AI cost metrics</li>"
         "<li><code>GET /extractions/{user_id}/{patient_id}/discharge-summary.docx</code> — fetch stored discharge summary DOCX</li>"
@@ -178,6 +179,22 @@ def get_discharge_summary_md(user_id: str, patient_id: str):
         markdown = r2_storage.get_text(client, key)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Discharge summary markdown not found.") from exc
+
+    return Response(content=markdown, media_type="text/markdown; charset=utf-8")
+
+
+@app.get("/extractions/{user_id}/{patient_id}/template.md")
+def get_template_md(user_id: str, patient_id: str):
+    require_r2()
+    user_id = parse_uuid(user_id, "user_id")
+    patient_id = parse_uuid(patient_id, "patient_id")
+
+    client = r2_storage.r2_client()
+    key = r2_storage.template_md_key(user_id, patient_id)
+    try:
+        markdown = r2_storage.get_text(client, key)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Template markdown not found.") from exc
 
     return Response(content=markdown, media_type="text/markdown; charset=utf-8")
 
@@ -282,6 +299,7 @@ def get_discharge_summary_docx(user_id: str, patient_id: str):
 async def extract_images(
     user_id: str = Form(...),
     files: list[UploadFile] = File(...),
+    template_files: list[UploadFile] = File(default=[]),
     patient_id: Optional[str] = Form(None),
     discharge_type: str = Form("standard"),
 ):
@@ -317,30 +335,44 @@ async def extract_images(
         if not image_items:
             raise HTTPException(status_code=400, detail="No readable pages or images found in upload.")
 
-        result = run_extraction_pipeline(image_items, discharge_type=discharge_type)
+        # Ingest doctor-provided template files (if any)
+        template_items: list[tuple[str, bytes]] = []
+        if template_files:
+            for index, upload in enumerate(template_files, start=1):
+                t_filename = upload.filename or f"template-{index:03d}"
+                t_content = await upload.read()
+                if t_content:
+                    template_items.append((t_filename, t_content))
 
+        result = run_extraction_pipeline(
+            image_items=image_items,
+            template_items=template_items or None,
+            discharge_type=discharge_type,
+        )
 
         client = r2_storage.r2_client()
         md_key = r2_storage.extraction_key(user_id, patient_id)
         docx_key = r2_storage.discharge_summary_docx_key(user_id, patient_id)
         meta_key = r2_storage.patient_metadata_key(user_id, patient_id)
+        summary_md_key = r2_storage.discharge_summary_md_key(user_id, patient_id)
 
         # 1. Store raw OCR markdown context
         r2_storage.put_text(client, md_key, result.context_md)
 
-        # 2. Store flow-specific artifacts
-        if result.discharge_type == "custom" and result.context_json:
-            json_key = r2_storage.extraction_json_key(user_id, patient_id)
-            r2_storage.put_json(client, json_key, result.context_json)
-        elif result.discharge_type == "standard" and result.summary_md:
-            summary_md_key = r2_storage.discharge_summary_md_key(user_id, patient_id)
+        # 2. Store synthesized discharge summary Markdown
+        if result.summary_md:
             r2_storage.put_text(client, summary_md_key, result.summary_md)
 
-        # 3. Store unified metadata.json for fast dashboard indexing
+        # 3. Store template Markdown if a custom template was used
+        if result.template_md:
+            template_key = r2_storage.template_md_key(user_id, patient_id)
+            r2_storage.put_text(client, template_key, result.template_md)
+
+        # 4. Store unified metadata.json for fast dashboard indexing
         if result.metadata:
             r2_storage.put_json(client, meta_key, result.metadata)
 
-        # 4. Store generated DOCX
+        # 5. Store generated DOCX
         r2_storage.put_bytes(
             client,
             docx_key,
@@ -348,7 +380,7 @@ async def extract_images(
             content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         )
 
-        # 5. Store AI performance and cost metrics
+        # 6. Store AI performance and cost metrics
         if result.metrics:
             metrics_key = r2_storage.extraction_metrics_key(user_id, patient_id)
             r2_storage.put_json(client, metrics_key, result.metrics)

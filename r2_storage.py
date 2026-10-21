@@ -59,6 +59,10 @@ def extraction_metrics_key(user_id: str, patient_id: str) -> str:
     return f"{extraction_prefix(user_id, patient_id)}/metrics.json"
 
 
+def template_md_key(user_id: str, patient_id: str) -> str:
+    return f"{extraction_prefix(user_id, patient_id)}/template.md"
+
+
 def user_patients_prefix(user_id: str) -> str:
     return f"users/{user_id}/patients/"
 
@@ -152,7 +156,7 @@ def build_patient_list_item(client, user_id: str, patient_id: str) -> Optional[d
 
     # 3. Backward compatibility: Try discharge-summary.md (Standard flow)
     try:
-        from discharge_types.standard_md_to_docx.render import parse_patient_metadata_from_md
+        from context_to_discharge.render import parse_patient_metadata_from_md
         summary_text = get_text(client, summary_md_key)
 
         meta = parse_patient_metadata_from_md(summary_text)

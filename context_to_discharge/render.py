@@ -39,7 +39,7 @@ def apply_inline_formatting(paragraph, text: str, default_size_pt: float = 11):
             run.italic = True
         else:
             run = paragraph.add_run(token)
-            
+
         run.font.name = FONT_NAME
         run.font.size = Pt(default_size_pt)
         run.font.color.rgb = BLACK_COLOR
@@ -74,11 +74,11 @@ def render_markdown_table(doc: DocumentType, table_lines: list[str]):
                 cell = table.cell(r_idx, c_idx)
                 cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
                 apply_cell_padding(cell, top=100, bottom=100, left=130, right=130)
-                
+
                 p = cell.paragraphs[0]
                 p.paragraph_format.space_after = Pt(0)
                 p.paragraph_format.space_before = Pt(0)
-                
+
                 # Header row styling or 4-column key columns styling
                 if r_idx == 0:
                     shading_elm = parse_xml(r'<w:shd {} w:fill="F2F4F7"/>'.format(nsdecls('w')))
@@ -226,7 +226,7 @@ def convert_markdown_to_docx_bytes(md_content: str) -> bytes:
 
 
 def parse_patient_metadata_from_md(md_content: str) -> dict:
-    """Extracts basic patient info from standard discharge summary markdown table for list views."""
+    """Extracts basic patient info from discharge summary markdown for filenames and dashboard list views."""
     meta = {
         "patient_name": "",
         "age": "",
@@ -235,10 +235,17 @@ def parse_patient_metadata_from_md(md_content: str) -> dict:
         "date_of_admission": "",
         "date_of_discharge": "",
     }
-    match_name = re.search(r"\|\s*(?:\*\*)?Patient\s*Name(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
+
+    # 1. Patient Name (Table or Key-Value)
+    match_name = re.search(r"\|\s*(?:\*\*)?Patient(?:'s)?\s*Name(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
     if match_name:
         meta["patient_name"] = match_name.group(1).strip()
-    
+    else:
+        match_name_kv = re.search(r"(?:Patient(?:'s)?\s*Name|Name)\s*[:\-]\s*([^\n\r|*]+)", md_content, re.IGNORECASE)
+        if match_name_kv:
+            meta["patient_name"] = match_name_kv.group(1).strip()
+
+    # 2. Age / Sex
     match_age_sex = re.search(r"\|\s*(?:\*\*)?Age\s*/\s*Sex(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
     if match_age_sex:
         val = match_age_sex.group(1).strip()
@@ -247,18 +254,44 @@ def parse_patient_metadata_from_md(md_content: str) -> dict:
             meta["age"] = parts[0]
         if len(parts) >= 2:
             meta["sex"] = parts[1]
+    else:
+        match_age = re.search(r"(?:Age|Age\s*in\s*years)\s*[:\-]\s*([0-9]+(?:\s*(?:years?|yrs?))?)", md_content, re.IGNORECASE)
+        if match_age:
+            meta["age"] = match_age.group(1).strip()
+        match_sex = re.search(r"(?:Sex|Gender)\s*[:\-]\s*([A-Za-z]+)", md_content, re.IGNORECASE)
+        if match_sex:
+            meta["sex"] = match_sex.group(1).strip()
 
+    # 3. UHID
     match_uhid = re.search(r"\|\s*(?:\*\*)?UHID(?:\s*No\.?)?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
     if match_uhid:
         meta["uhid_no"] = match_uhid.group(1).strip()
+    else:
+        match_uhid_kv = re.search(r"(?:UHID|IPD\s*ID|CR\s*NO)\s*[:\-]\s*([^\n\r|*]+)", md_content, re.IGNORECASE)
+        if match_uhid_kv:
+            meta["uhid_no"] = match_uhid_kv.group(1).strip()
 
+    # 4. Date of Admission
     match_doa = re.search(r"\|\s*(?:\*\*)?Date\s*of\s*Admission(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
     if match_doa:
         meta["date_of_admission"] = match_doa.group(1).strip()
+    else:
+        match_doa_kv = re.search(r"(?:Date\s*of\s*Admission|DOA|Admission\s*Date)\s*[:\-]\s*([^\n\r|*]+)", md_content, re.IGNORECASE)
+        if match_doa_kv:
+            meta["date_of_admission"] = match_doa_kv.group(1).strip()
 
+    # 5. Date of Discharge
     match_dod = re.search(r"\|\s*(?:\*\*)?Date\s*of\s*Discharge(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
     if match_dod:
         meta["date_of_discharge"] = match_dod.group(1).strip()
+    else:
+        match_dod_kv = re.search(r"(?:Date\s*of\s*Discharge|DOD|Discharge\s*Date)\s*[:\-]\s*([^\n\r|*]+)", md_content, re.IGNORECASE)
+        if match_dod_kv:
+            meta["date_of_discharge"] = match_dod_kv.group(1).strip()
+
+    # Clean any placeholders like '[to be filled]' from patient_name
+    if meta["patient_name"].startswith("[") and meta["patient_name"].endswith("]"):
+        if "name" in meta["patient_name"].lower():
+            meta["patient_name"] = ""
 
     return meta
-

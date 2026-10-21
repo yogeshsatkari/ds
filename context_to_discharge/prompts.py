@@ -1,12 +1,4 @@
-import os
-import time
 from typing import Optional
-from google import genai
-from google.genai import types
-
-import config
-import gemini_service
-import metrics as metrics_lib
 
 STANDARD_DISCHARGE_PROMPT = """You are a senior clinical documentation specialist and attending physician.
 
@@ -36,6 +28,15 @@ Your task is to transform the provided raw clinical patient context into a high-
    - Cross-reference automated flags (such as "PLT Clump?") with manual peripheral blood smear reports to differentiate genuine clinical conditions from lab artifacts.
    - For neuro-imaging (CT, MRI) and radiological studies, formulate findings strictly based on the formal Radiologist's Impression.
    - Explicitly list recommended or ordered tests whose reports are missing in the chart under a "Pending / Not Seen in File [verify]" section.
+
+4. Missing Data & Template Attribute Guardrails:
+   - If an attribute, sub-field, or parameter in the target template (e.g., CRT, specific vital sign, or lab test) is NOT documented in the patient chart:
+     * Omit the sub-bullet cleanly.
+     * ZERO TOLERANCE FOR FABRICATION: NEVER invent, extrapolate, or guess clinical findings, vitals, or lab numbers to fill a template slot.
+   - If an entire section in the template (e.g. "Operative Notes", "Hemodialysis Sessions", "Transfusion Details") did not occur or apply to this patient:
+     * Omit the section cleanly.
+   - For discharge prescriptions, take-home advice, or follow-up timelines:
+     * If not explicitly documented in the physician's chart, use `[verify]`. NEVER guess or invent discharge medications.
 
 ---
 
@@ -96,73 +97,61 @@ Output pure Markdown directly. Do NOT include opening or closing code fence mark
 """
 
 
-def default_synthesis_thinking_budget() -> int:
-    return config.GEMINI_SYNTHESIS_THINKING_BUDGET
+TEMPLATE_GUIDED_SYNTHESIS_PROMPT = """You are a senior clinical documentation specialist and attending physician.
+Your task is to generate a comprehensive, professional, and clinically accurate PATIENT DISCHARGE SUMMARY by filling the target HOSPITAL TEMPLATE using information extracted EXCLUSIVELY from the provided PATIENT CLINICAL CONTEXT.
+
+### CRITICAL CLINICAL SAFETY & MISSING DATA GUARDRAILS:
+
+1. **ZERO TOLERANCE FOR FABRICATION**:
+   - NEVER invent, assume, or extrapolate clinical findings, vital signs, lab values, or medications to fill an empty template slot.
+   - Every clinical parameter, number, medication, and dosage must trace directly to the patient context.
+
+2. **HANDLING AMBIGUITY & BLURRY HANDWRITING WITH `[verify]`**:
+   - If any clinical parameter, handwriting, dosage, lab unit, vital sign, or date is blurry, conflicting, or uncertain, append `[verify]` (e.g., `GCS E4 V? M6 [verify]`, `Urea / Creatinine 77.3 / 1.65 [verify]`).
+   - If an entry cannot be read at all, write `[verify]`. Do NOT invent or guess values.
+
+3. **ACCURATE HOSPITAL TIMELINE & PRESENTATION**:
+   - Identify the "Date of Admission" as the EARLIEST emergency department presentation or triage registration timestamp, NOT a subsequent internal bed allocation or ward transfer ticket.
+   - Distinguish the acute condition on arrival from the clinical trajectory and final status upon discharge.
+   - All bedside notes and labs belong to the same contiguous hospitalization episode. Ensure transcribed dates remain chronologically coherent with this active admission rather than misinterpreting cursive handwriting as unrelated prior years.
+
+4. **INVESTIGATION TRENDS & RADIOLOGY SYNTHESIS**:
+   - For neuro-imaging (CT, MRI) and radiological studies, formulate findings strictly based on the formal Radiologist's Impression.
+   - Cross-reference automated flags (such as "PLT Clump?") with manual peripheral blood smear reports to differentiate genuine clinical conditions from lab artifacts.
+   - Explicitly list ordered or recommended tests whose reports are missing in the chart under a "Pending / Not Seen in File [verify]" note.
+
+5. **MISSING ATTRIBUTES & SUB-FIELDS**:
+   - If an attribute in the template (e.g. `CRT`, `Pupils`, `Focal neurological deficit`, or a specific lab test) is NOT documented in the patient chart:
+     * Output `[Not recorded]` or omit that specific parameter cleanly.
+   - If an entire section in the template (e.g. `Operative Notes`, `Dialysis Sessions`, `Transfusion History`) was not applicable or did not occur for this patient:
+     * Output `[Not recorded]` or omit the section cleanly.
+
+6. **DISCHARGE PRESCRIPTIONS & ADVICE**:
+   - If take-home discharge medications, durations, or follow-up dates were not finalized or documented in the clinical context:
+     * Output `[verify]`.
+     * NEVER invent take-home medications or fabricate dosages.
+
+7. **TEMPLATE STRUCTURE COMPLIANCE**:
+   - Adopt the EXACT section headers, tables, and organizational flow specified in the target template.
+   - Replace all `[Placeholder ...]` slots with real patient data from the context, or the safe missing-data fallback above.
+
+8. **NO IMAGE OR LOGO SYNTAX**:
+   - Do NOT output image tags, logo placeholders, or markdown image syntax (such as `![Hospital Logo]` or `![Logo]`). Focus strictly on clean textual headers, tables, and narrative content.
+
+Output ONLY the completed Markdown discharge summary. Do NOT wrap output in ```markdown code blocks.
+"""
 
 
-def extract_discharge_summary_md_from_markdown(
-    clinical_text: str,
-    max_retries: int = 4,
-    thinking_budget: Optional[int] = None,
-) -> tuple[str, dict]:
-    clinical_text = clinical_text.strip()
-    if not clinical_text:
-        raise ValueError("Clinical context markdown is empty.")
-
-    if thinking_budget is None:
-        thinking_budget = default_synthesis_thinking_budget()
-
-    client = gemini_service.gemini_client()
-    prompt = f"{STANDARD_DISCHARGE_PROMPT}\n\nCONSOLIDATED PATIENT CLINICAL CONTEXT:\n{clinical_text}"
-
-    last_error: BaseException = RuntimeError("Gemini standard discharge summary generation failed.")
-    start_time = time.time()
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            config = types.GenerateContentConfig(
-                temperature=0.1,
-                thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
-                safety_settings=gemini_service.clinical_safety_settings(),
-            )
-            response = client.models.generate_content(
-                model=gemini_service.model_name(),
-                contents=[prompt],
-                config=config,
-            )
-            duration = time.time() - start_time
-            result = (response.text or "").strip()
-            # Strip code block wrappers if any were returned
-            if result.startswith("```markdown"):
-                result = result[len("```markdown"):].strip()
-            elif result.startswith("```"):
-                result = result[len("```"):].strip()
-            if result.endswith("```"):
-                result = result[:-3].strip()
-
-            if not result:
-                raise RuntimeError("Gemini returned empty discharge summary markdown.")
-
-            usage = getattr(response, "usage_metadata", None)
-            prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
-            visible_tokens = getattr(usage, "candidates_token_count", 0) or 0
-            thought_tokens = getattr(usage, "thoughts_token_count", 0) or 0
-
-            synthesis_metrics = metrics_lib.make_successful_synthesis_metrics(
-                prompt_tokens=prompt_tokens,
-                visible_tokens=visible_tokens,
-                thought_tokens=thought_tokens,
-                duration_seconds=duration,
-                output_char_count=len(result),
-                attempts=attempt,
-            )
-            return result, synthesis_metrics
-        except Exception as exc:
-            last_error = exc
-            err = str(exc)
-            if "429" in err or "RESOURCE_EXHAUSTED" in err or "getaddrinfo" in err:
-                time.sleep(6 * attempt)
-            elif attempt < max_retries:
-                time.sleep(3)
-
-    raise last_error
+def build_synthesis_prompt(clinical_text: str, template_md: Optional[str] = None) -> str:
+    """
+    Builds the synthesis prompt:
+    - If template_md is provided, guides Gemini to mirror that hospital template.
+    - If template_md is None, falls back to the institutional STANDARD_DISCHARGE_PROMPT.
+    """
+    if template_md and template_md.strip():
+        return (
+            f"{TEMPLATE_GUIDED_SYNTHESIS_PROMPT}\n\n"
+            f"=== TARGET HOSPITAL TEMPLATE ===\n{template_md.strip()}\n\n"
+            f"=== PATIENT CLINICAL CONTEXT ===\n{clinical_text.strip()}\n"
+        )
+    return f"{STANDARD_DISCHARGE_PROMPT}\n\nCONSOLIDATED PATIENT CLINICAL CONTEXT:\n{clinical_text.strip()}"
