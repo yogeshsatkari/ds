@@ -231,7 +231,7 @@ def build_docx_from_markdown(md_content: str) -> DocumentType:
                 p.paragraph_format.space_before = Pt(1)
                 p.paragraph_format.space_after = Pt(2)
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                apply_inline_formatting(p, stripped, default_size_pt=10)
+                apply_inline_formatting(p, stripped, default_size_pt=11)
             else:
                 p.paragraph_format.space_before = Pt(1)
                 p.paragraph_format.space_after = Pt(3)

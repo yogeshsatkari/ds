@@ -12,6 +12,60 @@ from google.genai import types
 import gemini_service
 
 
+def normalize_template_masthead(md: str) -> str:
+    """
+    Cleans up the top masthead of extracted template markdown:
+    1. Strips OCR glyph/logo artifacts (e.g. 'vAll India...' -> 'All India...').
+    2. Deduplicates consecutive repeated hospital title lines (e.g. bilingual OCR duplicates).
+    3. Ensures the official hospital name is formatted as a prominent Level 1 Heading ('# <Hospital Name>').
+    If any error occurs, safely returns the original markdown to preserve normal flow.
+    """
+    if not md:
+        return md
+
+    try:
+        lines = md.splitlines()
+        first_idx = None
+        for i, line in enumerate(lines):
+            if line.strip():
+                first_idx = i
+                break
+
+        if first_idx is None:
+            return md
+
+        # Clean leading single-letter / symbol OCR logo artifacts on line 1 (e.g. 'vAll' -> 'All')
+        clean_line1 = re.sub(r"^[a-z\W_]+(?=[A-Z])", "", lines[first_idx].strip())
+        raw_title1 = re.sub(r"^[#\s*]+", "", clean_line1).strip()
+        raw_title1 = re.sub(r"[*]+$", "", raw_title1).strip()
+
+        # Check next non-empty line
+        second_idx = None
+        for j in range(first_idx + 1, len(lines)):
+            if lines[j].strip():
+                second_idx = j
+                break
+
+        if second_idx is not None:
+            clean_line2 = lines[second_idx].strip()
+            raw_title2 = re.sub(r"^[#\s*]+", "", clean_line2).strip()
+            raw_title2 = re.sub(r"[*]+$", "", raw_title2).strip()
+
+            # If line 2 is identical to line 1 (e.g. bilingual translation or logo subcaption), drop line 2
+            if raw_title1 and raw_title2 and raw_title1.lower() == raw_title2.lower():
+                lines.pop(second_idx)
+
+        # Ensure the top hospital line is formatted as '# <Hospital Name>'
+        # (unless it's already DISCHARGE SUMMARY, a table, or a divider)
+        if raw_title1 and not raw_title1.lower().startswith("discharge summary") and not raw_title1.startswith(("|", "-", "*")):
+            lines[first_idx] = f"# {raw_title1}"
+
+        return "\n".join(lines)
+    except Exception:
+        # Fail-safe: if any unexpected issue arises, return original markdown to preserve normal flow
+        return md
+
+
 def normalize_image(content: bytes, max_dim: int = 2048) -> Image.Image:
     """
     Normalizes mobile/scanner photos:
@@ -147,10 +201,11 @@ def _table_to_markdown(table: Table) -> str:
 DOCX_TEMPLATE_TRANSFORMATION_PROMPT = """You are analyzing an extracted hospital discharge summary template/sample originally parsed from a DOCX document.
 Transform this document into a standardized, reusable discharge summary template by replacing patient-specific variable values with INFORMATIVE, DESCRIPTIVE PLACEHOLDERS while strictly preserving its visual layout, headers, and section hierarchy:
 
-1. **Headers & Branding**: 
-   - Capture official hospital name, institutional address, contact phone/helpline, website, accreditation badges (e.g. NABH/JCI), and department headings verbatim. Focus purely on clean textual branding (do NOT include image tags, logo placeholders, or markdown image syntax such as `![Hospital Logo]` or `![Logo]`).
-   - **Deduplication**: If the letterhead contains bilingual repetitions (e.g. state language/Hindi + English) or repeats the institution name as a logo sub-caption, output the clean English hospital name once. Never output identical duplicate hospital name lines.
+1. **Hospital Masthead & Branding (CRITICAL)**: 
+   - The official hospital name MUST be the very first line of the document, formatted as a Level 1 Heading: `# <Hospital Name>` (e.g. `# All India Institute of Medical Sciences Rishikesh`).
+   - **Deduplication**: Hospital letterheads often repeat the institution name (e.g. Hindi on line 1, English on line 2, or repeating under a logo). Strip any OCR logo artifacts (such as leading 'v', '✓', bullets, or icons). Output the clean English hospital name EXACTLY ONCE as `# <Hospital Name>`. Never output duplicate or bilingual repeated lines of the hospital name.
    - **Document Title Normalization**: Hospital samples often include transient administrative stamps, diagonal watermarks, or draft disclaimers (e.g. `(DRAFT - verification pending)`, `(DRAFT)`, `PROVISIONAL`, `DUPLICATE`, `COPY`). Strip all such transient status labels and watermarks. The document title heading must always be standardized cleanly as `## DISCHARGE SUMMARY` (or specific department discharge title).
+   - Capture genuine institutional address, contact phone/helpline, website, accreditation badges (e.g. NABH/JCI), and department headings verbatim. Focus purely on clean textual branding (do NOT include image tags, logo placeholders, or markdown image syntax such as `![Hospital Logo]` or `![Logo]`).
 2. **Headings**: Preserve all section headings (##, ###).
 3. **Tables & Header Boundary**: 
    - Preserve all markdown tables (| Col 1 | Col 2 |) with exact columns and minimal separators (| --- | --- |).
@@ -192,7 +247,7 @@ def docx_to_template_markdown(docx_bytes: bytes, ai_abstraction: bool = True) ->
     has_filled_data = len(raw_md) > 300 and not any(blank in raw_md for blank in ("_____", "[Full Patient Name]", "[Age in years]"))
 
     if not ai_abstraction or not has_filled_data or not gemini_service.gemini_configured():
-        return raw_md, local_metrics
+        return normalize_template_masthead(raw_md), local_metrics
 
     client = gemini_service.gemini_client()
     config = types.GenerateContentConfig(
@@ -216,6 +271,7 @@ def docx_to_template_markdown(docx_bytes: bytes, ai_abstraction: bool = True) ->
     extracted_md = re.sub(r"-{6,}", "---", extracted_md)
     extracted_md = re.sub(r"_{6,}", "_____", extracted_md)
     extracted_md = re.sub(r"!\[.*?\](?:\(.*?\))?\n?", "", extracted_md).strip()
+    extracted_md = normalize_template_masthead(extracted_md)
 
     usage = getattr(response, "usage_metadata", None)
     prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
@@ -249,10 +305,11 @@ def docx_to_template_markdown(docx_bytes: bytes, ai_abstraction: bool = True) ->
 TEMPLATE_STRUCTURAL_EXTRACTION_PROMPT = """You are analyzing a target hospital discharge summary template/sample.
 Transcribe its EXACT visual layout, structural hierarchy, and sections into clean Markdown, replacing patient-specific variable values with INFORMATIVE, DESCRIPTIVE PLACEHOLDERS:
 
-1. **Headers & Branding**: 
-   - Capture official hospital name, institutional address, contact phone/helpline, website, accreditation badges (e.g. NABH/JCI), and department headings verbatim. Focus purely on clean textual branding (do NOT include image tags, logo placeholders, or markdown image syntax such as `![Hospital Logo]` or `![Logo]`).
-   - **Deduplication**: If the letterhead contains bilingual repetitions (e.g. state language/Hindi + English) or repeats the institution name as a logo sub-caption, output the clean English hospital name once. Never output identical duplicate hospital name lines.
+1. **Hospital Masthead & Branding (CRITICAL)**: 
+   - The official hospital name MUST be the very first line of the document, formatted as a Level 1 Heading: `# <Hospital Name>` (e.g. `# All India Institute of Medical Sciences Rishikesh`).
+   - **Deduplication**: Hospital letterheads often repeat the institution name (e.g. Hindi on line 1, English on line 2, or repeating under a logo). Strip any OCR logo artifacts (such as leading 'v', '✓', bullets, or icons). Output the clean English hospital name EXACTLY ONCE as `# <Hospital Name>`. Never output duplicate or bilingual repeated lines of the hospital name.
    - **Document Title Normalization**: Hospital samples often include transient administrative stamps, diagonal watermarks, or draft disclaimers (e.g. `(DRAFT - verification pending)`, `(DRAFT)`, `PROVISIONAL`, `DUPLICATE`, `COPY`). Strip all such transient status labels and watermarks. The document title heading must always be standardized cleanly as `## DISCHARGE SUMMARY` (or specific department discharge title).
+   - Capture genuine institutional address, contact phone/helpline, website, accreditation badges (e.g. NABH/JCI), and department headings verbatim. Focus purely on clean textual branding (do NOT include image tags, logo placeholders, or markdown image syntax such as `![Hospital Logo]` or `![Logo]`).
 2. **Headings**: Structure section titles as Markdown headings (##, ###).
 3. **Tables & Header Boundary**: 
    - Preserve all tables exactly using clean Markdown table syntax (| Col 1 | Col 2 |). The separator row MUST contain exactly three hyphens per column: `| --- | --- |`. Never output more than three hyphens in a cell.
@@ -326,6 +383,7 @@ def image_or_pdf_to_markdown(template_items: list[tuple[str, bytes]], input_type
     extracted_md = re.sub(r"-{6,}", "---", extracted_md)
     extracted_md = re.sub(r"_{6,}", "_____", extracted_md)
     extracted_md = re.sub(r"!\[.*?\](?:\(.*?\))?\n?", "", extracted_md).strip()
+    extracted_md = normalize_template_masthead(extracted_md)
 
     usage = getattr(response, "usage_metadata", None)
     prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
@@ -370,10 +428,11 @@ def parse_template_to_markdown(
 
     docx_files = [item for item in template_items if item[0].lower().endswith(".docx")]
     if docx_files:
-        return docx_to_template_markdown(docx_files[0][1], ai_abstraction=ai_docx_abstraction)
+        md, metrics = docx_to_template_markdown(docx_files[0][1], ai_abstraction=ai_docx_abstraction)
+    elif any(item[0].lower().endswith(".pdf") for item in template_items):
+        md, metrics = image_or_pdf_to_markdown(template_items, input_type="PDF")
+    else:
+        md, metrics = image_or_pdf_to_markdown(template_items, input_type="Images (JPEG/PNG)")
 
-    pdf_files = [item for item in template_items if item[0].lower().endswith(".pdf")]
-    if pdf_files:
-        return image_or_pdf_to_markdown(template_items, input_type="PDF")
-
-    return image_or_pdf_to_markdown(template_items, input_type="Images (JPEG/PNG)")
+    md = normalize_template_masthead(md)
+    return md, metrics
