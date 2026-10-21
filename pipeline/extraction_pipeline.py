@@ -93,7 +93,10 @@ def run_extraction_pipeline(
             template_md=template_md,
         )
         docx_bytes = convert_markdown_to_docx_bytes(summary_md)
-        meta = parse_patient_metadata_from_md(summary_md)
+        try:
+            meta = parse_patient_metadata_from_md(summary_md, fallback_context_md=context_md)
+        except Exception:
+            meta = {}
         patient_name = (meta.get("patient_name") or "").strip()
 
         metadata = {

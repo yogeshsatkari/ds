@@ -1,6 +1,7 @@
 import re
 from io import BytesIO
 from pathlib import Path
+from typing import Optional
 from docx import Document
 from docx.document import Document as DocumentType
 from docx.enum.table import WD_ALIGN_VERTICAL, WD_TABLE_ALIGNMENT
@@ -252,8 +253,95 @@ def convert_markdown_to_docx_bytes(md_content: str) -> bytes:
     return buffer.getvalue()
 
 
-def parse_patient_metadata_from_md(md_content: str) -> dict:
-    """Extracts basic patient info from discharge summary markdown for filenames and dashboard list views."""
+def is_valid_patient_name(name: str) -> bool:
+    """Validates that an extracted string is a plausible patient name, not a doctor, attendant, or hospital label."""
+    if not name or len(name) < 2:
+        return False
+    lower = name.lower()
+    disallowed_prefixes = (
+        "dr.", "dr ", "doctor", "prof.", "nurse", "sister", "staff",
+        "attendant", "relative", "guardian", "father", "mother", "spouse",
+    )
+    if any(lower.startswith(p) for p in disallowed_prefixes):
+        return False
+    disallowed_keywords = (
+        "hospital", "clinic", "nursing home", "department", "signature",
+        "relative", "attendant", "consultant", "physician", "surgeon",
+        "resident", "anesthetist", "radiologist", "pathologist", "fellow",
+    )
+    if any(k in lower for k in disallowed_keywords):
+        return False
+    # Must contain at least one alphabetic character and not be purely numbers/symbols
+    if not re.search(r"[a-zA-Z]", name):
+        return False
+    if re.fullmatch(r"[\d\W_]+", name):
+        return False
+    return True
+
+
+def clean_val(raw: str) -> str:
+    """Strips markdown formatting, placeholders, and null indicators."""
+    val = (raw or "").strip()
+    val = val.strip("*_ \t")
+    # Drop placeholders like '[Not recorded]', '[to be filled]', '<Name>'
+    if (val.startswith("[") and val.endswith("]")) or (val.startswith("<") and val.endswith(">")):
+        return ""
+    if val.lower() in ("n/a", "na", "nil", "none", "not recorded", "unknown", "-", "--", "not specified"):
+        return ""
+    return val
+
+
+def extract_clean_date(raw: str) -> str:
+    """Extracts a clean date token (e.g., DD/MM/YYYY, DD-MM-YYYY, DD Mon YYYY) from raw text."""
+    val = clean_val(raw)
+    if not val:
+        return ""
+    m = re.search(r"\b(\d{1,2}[-/. ](?:[A-Za-z]{3,9}|\d{1,2})[-/. ]\d{2,4})\b", val)
+    if m:
+        return m.group(1).strip()
+    return val
+
+
+def extract_clean_id(raw: str) -> str:
+    """Cleans up UHID, IPD, or Registration numbers, stripping trailing bed/ward/dated text."""
+    val = clean_val(raw)
+    if not val:
+        return ""
+    val = re.split(r"\s+(?:bed|ward|dated|date|time|at)\b", val, flags=re.IGNORECASE)[0].strip()
+    return val
+
+
+def extract_clean_age(raw: str) -> str:
+    """Extracts clean age string, verifying reasonable digit bounds."""
+    val = clean_val(raw)
+    if not val:
+        return ""
+    m = re.search(r"\b(\d{1,3}\s*(?:years?|yrs?|y|months?|m|days?|d)?)\b", val, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    return val
+
+
+def extract_clean_sex(raw: str) -> str:
+    """Extracts and normalizes sex/gender."""
+    val = clean_val(raw)
+    if not val:
+        return ""
+    m = re.search(r"\b(Male|Female|Transgender|Other)\b", val, re.IGNORECASE)
+    if m:
+        return m.group(1).capitalize()
+    m_single = re.search(r"\b([MF])\b", val, re.IGNORECASE)
+    if m_single:
+        return "Male" if m_single.group(1).upper() == "M" else "Female"
+    return val
+
+
+def parse_patient_metadata_from_md(md_content: str, fallback_context_md: Optional[str] = None) -> dict:
+    """
+    Extracts basic patient info from discharge summary markdown for filenames and dashboard list views.
+    If any field is missing and fallback_context_md is provided, performs a strict, conservative
+    fallback search against the raw OCR context.
+    """
     meta = {
         "patient_name": "",
         "age": "",
@@ -262,81 +350,172 @@ def parse_patient_metadata_from_md(md_content: str) -> dict:
         "date_of_admission": "",
         "date_of_discharge": "",
     }
+    if not md_content or not isinstance(md_content, str):
+        if not fallback_context_md:
+            return meta
+        md_content = ""
 
-    def clean_val(raw: str) -> str:
-        val = raw.strip()
-        val = re.sub(r"^\*\*|\*\*$", "", val).strip()
-        # Drop placeholders like '[Not recorded]', '[to be filled]', '[Full Patient Name]'
-        if val.startswith("[") and val.endswith("]"):
-            return ""
-        return val
-
-    # 1. Patient Name (Table or Key-Value)
-    match_name = re.search(r"\|\s*(?:\*\*)?Patient(?:'s)?(?:\s*Name)?\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
-    if match_name:
-        meta["patient_name"] = clean_val(match_name.group(1))
-    else:
-        match_name_kv = re.search(r"(?:Patient(?:'s)?\s*Name|Name)\s*[:\-]\s*([^\n\r|*]+)", md_content, re.IGNORECASE)
-        if match_name_kv:
-            meta["patient_name"] = clean_val(match_name_kv.group(1))
-
-    # 2. Age / Sex (Combined or Separate)
-    match_age_sex = re.search(r"\|\s*(?:\*\*)?Age\s*/\s*Sex\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
-    if match_age_sex:
-        val = clean_val(match_age_sex.group(1))
-        parts = [p.strip() for p in val.split("/") if p.strip()]
-        if len(parts) >= 1:
-            meta["age"] = parts[0]
-        if len(parts) >= 2:
-            meta["sex"] = parts[1]
-    else:
-        # Separate row: | Age: | 74 Years |
-        match_age_row = re.search(r"\|\s*(?:\*\*)?Age\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
-        if match_age_row:
-            meta["age"] = clean_val(match_age_row.group(1))
+    try:
+        # --- Stage A: Primary extraction from Discharge Summary Markdown ---
+        # 1. Patient Name (Table or Key-Value)
+        match_name = re.search(r"\|\s*(?:\*\*)?Patient(?:'s)?(?:\s*Name)?\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
+        if match_name:
+            cand = clean_val(match_name.group(1))
+            if is_valid_patient_name(cand):
+                meta["patient_name"] = cand
         else:
-            match_age = re.search(r"(?:Age|Age\s*in\s*years)\s*[:\-]\s*([0-9]+(?:\s*(?:years?|yrs?))?)", md_content, re.IGNORECASE)
-            if match_age:
-                meta["age"] = clean_val(match_age.group(1))
+            match_name_kv = re.search(r"(?:Patient(?:'s)?\s*Name|Name)\s*[:\-]\s*([^\n\r|*]+)", md_content, re.IGNORECASE)
+            if match_name_kv:
+                cand = clean_val(match_name_kv.group(1))
+                if is_valid_patient_name(cand):
+                    meta["patient_name"] = cand
 
-        # Separate row: | Sex: | Male |
-        match_sex_row = re.search(r"\|\s*(?:\*\*)?(?:Sex|Gender)\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
-        if match_sex_row:
-            meta["sex"] = clean_val(match_sex_row.group(1))
+        # 2. Age / Sex (Combined or Separate)
+        match_age_sex = re.search(r"\|\s*(?:\*\*)?Age\s*/\s*Sex\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
+        if match_age_sex:
+            val = clean_val(match_age_sex.group(1))
+            parts = [p.strip() for p in val.split("/") if p.strip()]
+            if len(parts) >= 1:
+                meta["age"] = extract_clean_age(parts[0])
+            if len(parts) >= 2:
+                meta["sex"] = extract_clean_sex(parts[1])
         else:
-            match_sex = re.search(r"(?:Sex|Gender)\s*[:\-]\s*([A-Za-z]+)", md_content, re.IGNORECASE)
-            if match_sex:
-                meta["sex"] = clean_val(match_sex.group(1))
+            # Separate row: | Age: | 74 Years |
+            match_age_row = re.search(r"\|\s*(?:\*\*)?Age\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
+            if match_age_row:
+                meta["age"] = extract_clean_age(match_age_row.group(1))
+            else:
+                match_age = re.search(r"(?:Age|Age\s*in\s*years)\s*[:\-]\s*([0-9]+(?:\s*(?:years?|yrs?))?)", md_content, re.IGNORECASE)
+                if match_age:
+                    meta["age"] = extract_clean_age(match_age.group(1))
 
-    # 3. UHID / IPD ID (Strict UHID prioritized over secondary IPD ID)
-    match_uhid_strict = re.search(r"\|\s*(?:\*\*)?UHID(?:\s*No\.?)?\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
-    if match_uhid_strict:
-        meta["uhid_no"] = clean_val(match_uhid_strict.group(1))
-    else:
-        match_uhid_alt = re.search(r"\|\s*(?:\*\*)?(?:IPD\s*ID|CR\s*NO\.?)\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
-        if match_uhid_alt:
-            meta["uhid_no"] = clean_val(match_uhid_alt.group(1))
+            # Separate row: | Sex: | Male |
+            match_sex_row = re.search(r"\|\s*(?:\*\*)?(?:Sex|Gender)\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
+            if match_sex_row:
+                meta["sex"] = extract_clean_sex(match_sex_row.group(1))
+            else:
+                match_sex = re.search(r"(?:Sex|Gender)\s*[:\-]\s*([A-Za-z]+)", md_content, re.IGNORECASE)
+                if match_sex:
+                    meta["sex"] = extract_clean_sex(match_sex.group(1))
+
+        # 3. UHID / IPD ID (Strict UHID prioritized over secondary IPD ID)
+        match_uhid_strict = re.search(r"\|\s*(?:\*\*)?UHID(?:\s*No\.?)?\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
+        if match_uhid_strict:
+            meta["uhid_no"] = extract_clean_id(match_uhid_strict.group(1))
         else:
-            match_uhid_kv = re.search(r"(?:UHID|IPD\s*ID|CR\s*NO)\s*[:\-]\s*([^\n\r|*]+)", md_content, re.IGNORECASE)
-            if match_uhid_kv:
-                meta["uhid_no"] = clean_val(match_uhid_kv.group(1))
+            match_uhid_alt = re.search(r"\|\s*(?:\*\*)?(?:IPD\s*ID|CR\s*NO\.?)\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
+            if match_uhid_alt:
+                meta["uhid_no"] = extract_clean_id(match_uhid_alt.group(1))
+            else:
+                match_uhid_kv = re.search(r"(?:UHID|IPD\s*ID|CR\s*NO)\s*[:\-]\s*([^\n\r|*]+)", md_content, re.IGNORECASE)
+                if match_uhid_kv:
+                    meta["uhid_no"] = extract_clean_id(match_uhid_kv.group(1))
 
-    # 4. Date of Admission
-    match_doa = re.search(r"\|\s*(?:\*\*)?(?:Date\s*of\s*Admission|Admission\s*Date|DOA)\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
-    if match_doa:
-        meta["date_of_admission"] = clean_val(match_doa.group(1))
-    else:
-        match_doa_kv = re.search(r"(?:Date\s*of\s*Admission|DOA|Admission\s*Date)\s*[:\-]\s*([^\n\r|*]+)", md_content, re.IGNORECASE)
-        if match_doa_kv:
-            meta["date_of_admission"] = clean_val(match_doa_kv.group(1))
+        # 4. Date of Admission
+        match_doa = re.search(r"\|\s*(?:\*\*)?(?:Date\s*of\s*Admission|Admission\s*Date|DOA)\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
+        if match_doa:
+            meta["date_of_admission"] = extract_clean_date(match_doa.group(1))
+        else:
+            match_doa_kv = re.search(r"(?:Date\s*of\s*Admission|DOA|Admission\s*Date)\s*[:\-]\s*([^\n\r|*]+)", md_content, re.IGNORECASE)
+            if match_doa_kv:
+                meta["date_of_admission"] = extract_clean_date(match_doa_kv.group(1))
 
-    # 5. Date of Discharge
-    match_dod = re.search(r"\|\s*(?:\*\*)?(?:Date\s*of\s*Discharge|Discharge\s*Date|DOD)\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
-    if match_dod:
-        meta["date_of_discharge"] = clean_val(match_dod.group(1))
-    else:
-        match_dod_kv = re.search(r"(?:Date\s*of\s*Discharge|DOD|Discharge\s*Date)\s*[:\-]\s*([^\n\r|*]+)", md_content, re.IGNORECASE)
-        if match_dod_kv:
-            meta["date_of_discharge"] = clean_val(match_dod_kv.group(1))
+        # 5. Date of Discharge
+        match_dod = re.search(r"\|\s*(?:\*\*)?(?:Date\s*of\s*Discharge|Discharge\s*Date|DOD)\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
+        if match_dod:
+            meta["date_of_discharge"] = extract_clean_date(match_dod.group(1))
+        else:
+            match_dod_kv = re.search(r"(?:Date\s*of\s*Discharge|DOD|Discharge\s*Date)\s*[:\-]\s*([^\n\r|*]+)", md_content, re.IGNORECASE)
+            if match_dod_kv:
+                meta["date_of_discharge"] = extract_clean_date(match_dod_kv.group(1))
+
+        # --- Stage B: Strict Fallback search in raw OCR context.md for missing values ---
+        if fallback_context_md and isinstance(fallback_context_md, str) and fallback_context_md.strip():
+            # 1. Fallback Patient Name (Strict: must have 'Patient' or 'Pt', never a generic 'Name')
+            if not meta["patient_name"]:
+                match_p_name = re.search(
+                    r"(?:\|\s*(?:\*\*)?Patient(?:'s)?(?:\s*Name)?\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|"
+                    r"|(?:Patient(?:'s)?\s*Name|Name\s+of\s+(?:the\s+)?Patient|Pt\.?\s*Name)\s*[:\-]\s*([^\n\r|*]+))",
+                    fallback_context_md,
+                    re.IGNORECASE,
+                )
+                if match_p_name:
+                    cand = clean_val(match_p_name.group(1) or match_p_name.group(2))
+                    if is_valid_patient_name(cand):
+                        meta["patient_name"] = cand
+
+            # 2. Fallback Age / Sex
+            if not meta["age"] or not meta["sex"]:
+                match_p_age_sex = re.search(
+                    r"(?:\|\s*(?:\*\*)?Age\s*/\s*Sex\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|"
+                    r"|(?:Age\s*[/|]\s*(?:Sex|Gender))\s*[:\-]\s*([^\n\r|*]+))",
+                    fallback_context_md,
+                    re.IGNORECASE,
+                )
+                if match_p_age_sex:
+                    raw_val = match_p_age_sex.group(1) or match_p_age_sex.group(2)
+                    parts = [p.strip() for p in raw_val.split("/") if p.strip()]
+                    if not meta["age"] and len(parts) >= 1:
+                        meta["age"] = extract_clean_age(parts[0])
+                    if not meta["sex"] and len(parts) >= 2:
+                        meta["sex"] = extract_clean_sex(parts[1])
+
+                if not meta["age"]:
+                    match_p_age = re.search(
+                        r"(?:Age|Age\s*in\s*years)\s*[:\-]\s*([0-9]+\s*(?:years?|yrs?|y|months?|m|days?|d)?)",
+                        fallback_context_md,
+                        re.IGNORECASE,
+                    )
+                    if match_p_age:
+                        meta["age"] = extract_clean_age(match_p_age.group(1))
+
+                if not meta["sex"]:
+                    match_p_sex = re.search(
+                        r"(?:Sex|Gender)\s*[:\-]\s*(Male|Female|M|F|Transgender|Other)\b",
+                        fallback_context_md,
+                        re.IGNORECASE,
+                    )
+                    if match_p_sex:
+                        meta["sex"] = extract_clean_sex(match_p_sex.group(1))
+
+            # 3. Fallback UHID / IPD / Registration No
+            if not meta["uhid_no"]:
+                match_p_uhid = re.search(
+                    r"(?:\|\s*(?:\*\*)?(?:UHID|IPD|CR\s*NO)\S*\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|"
+                    r"|(?:UHID(?:\s*No\.?)?|IPD\s*(?:ID|No\.?)|CR\s*NO\.?|MRN|Reg(?:istration)?\.?\s*(?:No\.?|ID))\s*[:\-]\s*([^\n\r|*]+))",
+                    fallback_context_md,
+                    re.IGNORECASE,
+                )
+                if match_p_uhid:
+                    cand = extract_clean_id(match_p_uhid.group(1) or match_p_uhid.group(2))
+                    if cand and len(cand) >= 2:
+                        meta["uhid_no"] = cand
+
+            # 4. Fallback Date of Admission
+            if not meta["date_of_admission"]:
+                match_p_doa = re.search(
+                    r"(?:Date\s*of\s*Admission|Admission\s*Date|DOA|Admitted\s*on)\s*[:\-]\s*([^\n\r|*]+)",
+                    fallback_context_md,
+                    re.IGNORECASE,
+                )
+                if match_p_doa:
+                    cand = extract_clean_date(match_p_doa.group(1))
+                    if cand:
+                        meta["date_of_admission"] = cand
+
+            # 5. Fallback Date of Discharge
+            if not meta["date_of_discharge"]:
+                match_p_dod = re.search(
+                    r"(?:Date\s*of\s*Discharge|Discharge\s*Date|DOD|Discharged\s*on)\s*[:\-]\s*([^\n\r|*]+)",
+                    fallback_context_md,
+                    re.IGNORECASE,
+                )
+                if match_p_dod:
+                    cand = extract_clean_date(match_p_dod.group(1))
+                    if cand:
+                        meta["date_of_discharge"] = cand
+
+    except Exception:
+        pass
 
     return meta

@@ -283,6 +283,12 @@ def get_discharge_summary_docx(user_id: str, patient_id: str):
             try:
                 summary_text = r2_storage.get_text(client, summary_md_key)
                 parsed_meta = parse_patient_metadata_from_md(summary_text)
+                if not parsed_meta.get("patient_name"):
+                    try:
+                        context_text = r2_storage.get_text(client, r2_storage.extraction_key(user_id, patient_id))
+                        parsed_meta = parse_patient_metadata_from_md(summary_text, fallback_context_md=context_text)
+                    except Exception:
+                        pass
                 if parsed_meta.get("patient_name"):
                     filename = docx_filename(parsed_meta["patient_name"])
             except FileNotFoundError:

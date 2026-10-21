@@ -158,8 +158,15 @@ def build_patient_list_item(client, user_id: str, patient_id: str) -> Optional[d
     try:
         from context_to_discharge.render import parse_patient_metadata_from_md
         summary_text = get_text(client, summary_md_key)
-
         meta = parse_patient_metadata_from_md(summary_text)
+
+        # Lazy fallback: only fetch context.md if essential metadata is missing
+        if any(not meta.get(f) for f in ("patient_name", "uhid_no")):
+            try:
+                context_text = get_text(client, md_key)
+                meta = parse_patient_metadata_from_md(summary_text, fallback_context_md=context_text)
+            except Exception:
+                pass
         for field in (
             "patient_name",
             "age",
