@@ -232,22 +232,46 @@ Transform this document into a standardized, reusable discharge summary template
 Output ONLY the clean Markdown template. Do NOT wrap output in ```markdown code blocks.
 """
 
-def docx_to_template_markdown(docx_bytes: bytes, ai_abstraction: bool = True) -> tuple[str, dict]:
+def multi_docx_to_template_markdown(
+    docx_items: list[tuple[str, bytes]],
+    ai_abstraction: bool = True,
+) -> tuple[str, dict]:
     """
-    Parses a DOCX template:
-    1. Extracts raw markdown from DOCX via local CPU (python-docx).
-    2. If ai_abstraction is True and the document contains filled patient data,
-       uses Gemini text model to abstract patient data into descriptive placeholders,
-       achieving parity with Image and PDF templates.
+    Parses one or multiple DOCX template files:
+    1. Extracts raw markdown from each DOCX via local CPU (python-docx).
+    2. Combines them into a cohesive structure.
+    3. If filled patient data is detected, uses Gemini text model to abstract into descriptive placeholders.
     """
     start_time = time.time()
-    raw_md, local_metrics = docx_to_markdown(docx_bytes)
+    parts = []
+    for filename, content in docx_items:
+        raw_part, _ = docx_to_markdown(content)
+        if raw_part.strip():
+            parts.append(raw_part.strip())
+
+    combined_raw_md = "\n\n---\n\n".join(parts).strip()
+    if not combined_raw_md:
+        return "", {"format": "DOCX", "duration_seconds": 0, "total_tokens": 0, "cost_usd": 0.0, "cost_inr": 0.0, "char_count": 0}
 
     # Check if raw_md is already an unfilled blank template (e.g. contains placeholders and lacks filled clinical text)
-    has_filled_data = len(raw_md) > 300 and not any(blank in raw_md for blank in ("_____", "[Full Patient Name]", "[Age in years]"))
+    has_filled_data = len(combined_raw_md) > 300 and not any(blank in combined_raw_md for blank in ("_____", "[Full Patient Name]", "[Age in years]"))
 
     if not ai_abstraction or not has_filled_data or not gemini_service.gemini_configured():
-        return normalize_template_masthead(raw_md), local_metrics
+        duration = time.time() - start_time
+        metrics = {
+            "format": f"DOCX ({len(docx_items)} file(s))",
+            "method": "python-docx (local CPU)",
+            "duration_seconds": round(duration, 3),
+            "prompt_tokens": 0,
+            "visible_tokens": 0,
+            "thought_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "cost_usd": 0.0,
+            "cost_inr": 0.0,
+            "char_count": len(combined_raw_md),
+        }
+        return normalize_template_masthead(combined_raw_md), metrics
 
     client = gemini_service.gemini_client()
     config = types.GenerateContentConfig(
@@ -255,7 +279,7 @@ def docx_to_template_markdown(docx_bytes: bytes, ai_abstraction: bool = True) ->
         max_output_tokens=4096,
         thinking_config=types.ThinkingConfig(thinking_budget=1024),
     )
-    prompt = f"{DOCX_TEMPLATE_TRANSFORMATION_PROMPT}\n\nRAW EXTRACTED DOCX CONTENT:\n{raw_md}"
+    prompt = f"{DOCX_TEMPLATE_TRANSFORMATION_PROMPT}\n\nRAW EXTRACTED DOCX CONTENT:\n{combined_raw_md}"
     response = client.models.generate_content(
         model=gemini_service.model_name(),
         contents=[prompt],
@@ -283,9 +307,117 @@ def docx_to_template_markdown(docx_bytes: bytes, ai_abstraction: bool = True) ->
     cost_usd, cost_inr = gemini_service.calculate_cost(prompt_tokens, billed_output_tokens)
 
     metrics = {
-        "format": "DOCX (AI Template Abstraction)",
+        "format": f"DOCX ({len(docx_items)} file(s)) (AI Template Abstraction)",
         "method": f"python-docx + Gemini ({gemini_service.model_name()})",
         "duration_seconds": round(duration, 2),
+        "prompt_tokens": prompt_tokens,
+        "visible_tokens": visible_tokens,
+        "thought_tokens": thought_tokens,
+        "output_tokens": billed_output_tokens,
+        "total_tokens": total_tokens,
+        "cost_usd": round(cost_usd, 6),
+        "cost_inr": round(cost_inr, 4),
+        "char_count": len(extracted_md),
+    }
+    return extracted_md, metrics
+
+
+def docx_to_template_markdown(docx_bytes: bytes, ai_abstraction: bool = True) -> tuple[str, dict]:
+    """Backwards-compatible wrapper for single DOCX byte stream."""
+    return multi_docx_to_template_markdown([("template.docx", docx_bytes)], ai_abstraction=ai_abstraction)
+
+
+def mixed_template_to_markdown(
+    visual_items: list[tuple[str, bytes]],
+    docx_items: list[tuple[str, bytes]],
+) -> tuple[str, dict]:
+    """
+    Extracts a unified template when both visual pages (Images/PDF) AND Word documents (DOCX) are uploaded.
+    1. Extracts raw text/tables from the DOCX file(s) locally via python-docx (0 tokens).
+    2. Renders PDF/images into normalized PIL Images.
+    3. Feeds both visual images and DOCX text to Gemini Vision to synthesize a single cohesive template.
+    """
+    if not gemini_service.gemini_configured():
+        raise RuntimeError("GEMINI_API_KEY is not configured.")
+
+    client = gemini_service.gemini_client()
+    start_time = time.time()
+
+    # 1. Extract DOCX text locally (0 tokens, < 50ms)
+    docx_parts = []
+    for filename, content in docx_items:
+        raw_part, _ = docx_to_markdown(content)
+        if raw_part.strip():
+            docx_parts.append(f"<!-- Source DOCX: {filename} -->\n{raw_part.strip()}")
+    combined_docx_text = "\n\n---\n\n".join(docx_parts)
+
+    # 2. Extract visual pages (PDFs + Images)
+    pil_images: list[Image.Image] = []
+    for filename, content in visual_items:
+        ext = os.path.splitext(filename.lower())[1]
+        try:
+            if ext == ".pdf":
+                page_images = gemini_service.pdf_to_page_images(content, base_filename=filename)
+                for page_name, img_bytes in page_images:
+                    pil_images.append(normalize_image(img_bytes))
+            else:
+                pil_images.append(normalize_image(content))
+        except Exception:
+            continue
+
+    if not pil_images:
+        # Fallback to pure docx if no visual images could be decoded
+        return multi_docx_to_template_markdown(docx_items)
+
+    prompt = f"""{TEMPLATE_STRUCTURAL_EXTRACTION_PROMPT}
+
+ADDITIONAL TEMPLATE CONTENT FROM ATTACHED WORD DOCUMENT(S) ({len(docx_items)} file(s)):
+Synthesize the visual branding, hospital letterhead, and layout shown in the attached image(s) with the sections and table schemas from the Word document into ONE unified, complete discharge summary template:
+
+```
+{combined_docx_text}
+```
+"""
+
+    contents: list[Any] = [*pil_images, prompt]
+
+    config = types.GenerateContentConfig(
+        temperature=0.2,
+        max_output_tokens=4096,
+        thinking_config=types.ThinkingConfig(thinking_budget=1024),
+    )
+    response = client.models.generate_content(
+        model=gemini_service.model_name(),
+        contents=contents,
+        config=config,
+    )
+    duration = time.time() - start_time
+
+    extracted_md = (response.text or "").strip()
+    if extracted_md.startswith("```"):
+        extracted_md = re.sub(r"^```(?:markdown)?\s*", "", extracted_md)
+        extracted_md = re.sub(r"\s*```$", "", extracted_md)
+
+    extracted_md = re.sub(r"-{6,}", "---", extracted_md)
+    extracted_md = re.sub(r"_{6,}", "_____", extracted_md)
+    extracted_md = re.sub(r"!\[.*?\](?:\(.*?\))?\n?", "", extracted_md).strip()
+    extracted_md = normalize_template_masthead(extracted_md)
+
+    usage = getattr(response, "usage_metadata", None)
+    prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
+    visible_tokens = getattr(usage, "candidates_token_count", 0) or 0
+    thought_tokens = getattr(usage, "thoughts_token_count", 0) or 0
+    billed_output_tokens = visible_tokens + thought_tokens
+    total_tokens = prompt_tokens + billed_output_tokens
+
+    cost_usd, cost_inr = gemini_service.calculate_cost(prompt_tokens, billed_output_tokens)
+
+    metrics = {
+        "format": f"Mixed ({len(docx_items)} DOCX + {len(visual_items)} Visual)",
+        "method": f"python-docx + Gemini Vision ({gemini_service.model_name()})",
+        "duration_seconds": round(duration, 2),
+        "pages_processed": len(pil_images),
+        "docx_files_processed": len(docx_items),
         "prompt_tokens": prompt_tokens,
         "visible_tokens": visible_tokens,
         "thought_tokens": thought_tokens,
@@ -350,13 +482,15 @@ def image_or_pdf_to_markdown(template_items: list[tuple[str, bytes]], input_type
 
     for filename, content in template_items:
         ext = os.path.splitext(filename.lower())[1]
-
-        if ext == ".pdf":
-            page_images = gemini_service.pdf_to_page_images(content, base_filename=filename)
-            for page_name, img_bytes in page_images:
-                pil_images.append(normalize_image(img_bytes))
-        else:
-            pil_images.append(normalize_image(content))
+        try:
+            if ext == ".pdf":
+                page_images = gemini_service.pdf_to_page_images(content, base_filename=filename)
+                for page_name, img_bytes in page_images:
+                    pil_images.append(normalize_image(img_bytes))
+            else:
+                pil_images.append(normalize_image(content))
+        except Exception:
+            continue
 
     if not pil_images:
         return "", {"format": input_type, "duration_seconds": 0, "total_tokens": 0, "cost_usd": 0.0, "cost_inr": 0.0, "char_count": 0}
@@ -420,19 +554,34 @@ def parse_template_to_markdown(
     ai_docx_abstraction: bool = True,
 ) -> tuple[str, dict]:
     """
-    Unified entry point: accepts any list of uploaded template files
-    (DOCX, PDF, or Images) and returns the inferred structural Markdown.
+    Unified entry point: accepts ANY combination of uploaded template files
+    (DOCX, PDF, Images, or mixed combinations) and returns the inferred structural Markdown.
     """
     if not template_items:
         return "", {"format": "None", "duration_seconds": 0, "total_tokens": 0, "cost_usd": 0.0, "cost_inr": 0.0, "char_count": 0}
 
-    docx_files = [item for item in template_items if item[0].lower().endswith(".docx")]
-    if docx_files:
-        md, metrics = docx_to_template_markdown(docx_files[0][1], ai_abstraction=ai_docx_abstraction)
-    elif any(item[0].lower().endswith(".pdf") for item in template_items):
-        md, metrics = image_or_pdf_to_markdown(template_items, input_type="PDF")
+    docx_items = [item for item in template_items if item[0].lower().endswith(".docx")]
+    visual_items = [item for item in template_items if not item[0].lower().endswith(".docx")]
+
+    # 1. Mixed Combination: Both DOCX and Visual (Images/PDFs) provided
+    if docx_items and visual_items:
+        md, metrics = mixed_template_to_markdown(visual_items, docx_items)
+
+    # 2. Pure DOCX (one or multiple Word files)
+    elif docx_items:
+        md, metrics = multi_docx_to_template_markdown(docx_items, ai_abstraction=ai_docx_abstraction)
+
+    # 3. Pure Visual: PDFs and/or Images
     else:
-        md, metrics = image_or_pdf_to_markdown(template_items, input_type="Images (JPEG/PNG)")
+        has_pdf = any(item[0].lower().endswith(".pdf") for item in visual_items)
+        has_images = any(not item[0].lower().endswith(".pdf") for item in visual_items)
+        if has_pdf and has_images:
+            input_type = "PDF + Images"
+        elif has_pdf:
+            input_type = "PDF"
+        else:
+            input_type = "Images (JPEG/PNG/WebP/TIFF)"
+        md, metrics = image_or_pdf_to_markdown(visual_items, input_type=input_type)
 
     md = normalize_template_masthead(md)
     return md, metrics
