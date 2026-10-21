@@ -7,6 +7,7 @@
 
 
 
+
 ## Cloudflare R2 Storage Pricing
 
 This project uses **S3-compatible object storage** with **zero egress fees** via [Cloudflare R2]
