@@ -111,16 +111,17 @@ def build_docx_from_markdown(md_content: str) -> DocumentType:
         section.right_margin = Inches(0.75)
 
     lines = md_content.splitlines()
+
     table_buffer = []
     in_table = False
-    in_header_block = True  # Top header block before the first '---'
+    in_header_block = True  # True only for top institutional letterhead (before table, divider, or ###)
 
     for line in lines:
         stripped = line.strip()
 
         # 1. Accumulate Markdown Table Lines
         if stripped.startswith("|") and stripped.endswith("|"):
-            in_header_block = False  # The moment a table begins, the header block is over
+            in_header_block = False  # The moment a table begins, header block is over
             in_table = True
             table_buffer.append(stripped)
             continue
@@ -135,7 +136,7 @@ def build_docx_from_markdown(md_content: str) -> DocumentType:
 
         # 2. Horizontal Divider Line (--- or ***) -> Marks end of top header block
         if re.match(r"^(\-{3,}|\_{3,}|\*{3,})$", stripped):
-            in_header_block = False  # Everything below this line is left-aligned body
+            in_header_block = False  # Everything below this line is clinical body
             p = doc.add_paragraph()
             p.paragraph_format.space_before = Pt(4)
             p.paragraph_format.space_after = Pt(4)
@@ -149,46 +150,57 @@ def build_docx_from_markdown(md_content: str) -> DocumentType:
             p._element.get_or_add_pPr().append(pBdr)
             continue
 
-        # 3. Level 1 Heading (# Title)
+        # 3. Level 1 Heading (# Hospital Name / Masthead)
         if stripped.startswith("# "):
             p = doc.add_paragraph()
             p.paragraph_format.space_before = Pt(12)
             p.paragraph_format.space_after = Pt(3)
-            if in_header_block:
-                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            else:
-                p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-            run = p.add_run(stripped[2:].strip())
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER if in_header_block else WD_ALIGN_PARAGRAPH.LEFT
+            heading_text = re.sub(r"^\*\*|\*\*$", "", stripped[2:].strip())
+            run = p.add_run(heading_text)
             run.font.name = FONT_NAME
-            run.font.size = Pt(13.5)
+            run.font.size = Pt(16)
             run.font.color.rgb = BLACK_COLOR
             run.bold = True
 
-        # 4. Level 2 Heading (## Section / Subtitle)
+        # 4. Level 2 Heading (## Subtitle / DISCHARGE SUMMARY)
         elif stripped.startswith("## "):
             p = doc.add_paragraph()
-            p.paragraph_format.space_before = Pt(10)
-            p.paragraph_format.space_after = Pt(3)
-            if in_header_block:
-                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            else:
-                p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-            run = p.add_run(stripped[3:].strip())
+            p.paragraph_format.space_before = Pt(8)
+            p.paragraph_format.space_after = Pt(4)
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER if in_header_block else WD_ALIGN_PARAGRAPH.LEFT
+            heading_text = re.sub(r"^\*\*|\*\*$", "", stripped[3:].strip())
+            run = p.add_run(heading_text)
             run.font.name = FONT_NAME
-            run.font.size = Pt(12)
+            run.font.size = Pt(14)
             run.font.color.rgb = BLACK_COLOR
             run.bold = True
 
-        # 5. Level 3 Heading (### Sub-section / Clinical Domain) - Always LEFT aligned
+        # 5. Level 3 Heading (### Section Heading) - Always LEFT aligned
         elif stripped.startswith("### "):
             in_header_block = False  # Section heading reached, header block is over
             p = doc.add_paragraph()
-            p.paragraph_format.space_before = Pt(8)
+            p.paragraph_format.space_before = Pt(10)
+            p.paragraph_format.space_after = Pt(3)
+            p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            heading_text = re.sub(r"^\*\*|\*\*$", "", stripped[4:].strip())
+            run = p.add_run(heading_text)
+            run.font.name = FONT_NAME
+            run.font.size = Pt(12.5)
+            run.font.color.rgb = BLACK_COLOR
+            run.bold = True
+
+        # Level 4 Heading (#### Sub-heading)
+        elif stripped.startswith("#### "):
+            in_header_block = False
+            p = doc.add_paragraph()
+            p.paragraph_format.space_before = Pt(6)
             p.paragraph_format.space_after = Pt(2)
             p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-            run = p.add_run(stripped[4:].strip())
+            heading_text = re.sub(r"^\*\*|\*\*$", "", stripped[5:].strip())
+            run = p.add_run(heading_text)
             run.font.name = FONT_NAME
-            run.font.size = Pt(11)
+            run.font.size = Pt(11.5)
             run.font.color.rgb = BLACK_COLOR
             run.bold = True
 
@@ -212,18 +224,19 @@ def build_docx_from_markdown(md_content: str) -> DocumentType:
             p.alignment = WD_ALIGN_PARAGRAPH.LEFT
             apply_inline_formatting(p, content)
 
-        # 8. Regular Body Paragraph
+        # 8. Regular Paragraph (Address/Contact if in header block, else Left-aligned Clinical Body)
         else:
             p = doc.add_paragraph()
-            p.paragraph_format.space_before = Pt(1)
-            p.paragraph_format.space_after = Pt(3)
-            # Only short sub-headers (like hospital address or phone) can be centered at the very top
-            if in_header_block and len(stripped) < 80 and not any(k in stripped.lower() for k in ("patient", "admission", "history", "diagnosis")):
+            if in_header_block:
+                p.paragraph_format.space_before = Pt(1)
+                p.paragraph_format.space_after = Pt(2)
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                apply_inline_formatting(p, stripped, default_size_pt=10)
             else:
-                in_header_block = False
+                p.paragraph_format.space_before = Pt(1)
+                p.paragraph_format.space_after = Pt(3)
                 p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-            apply_inline_formatting(p, stripped)
+                apply_inline_formatting(p, stripped)
 
     if in_table:
         render_markdown_table(doc, table_buffer)
