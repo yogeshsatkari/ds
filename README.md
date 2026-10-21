@@ -16,3 +16,7 @@ This project uses **S3-compatible object storage** with **zero egress fees** via
 * **Storage:** 10 GB
 * **Class A Ops (Writes):** 1 Million
 * **Class B Ops (Reads):** 10 Million
+
+## Backlog
+* **Dashboard Database (When scaling past 50 doctors):** Move dashboard patient listing from Cloudflare R2 to a simple database (like Supabase or Cloudflare D1) so fetching all discharges remains instant without slowing down the free Render server.
+
