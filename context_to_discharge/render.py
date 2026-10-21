@@ -120,6 +120,7 @@ def build_docx_from_markdown(md_content: str) -> DocumentType:
 
         # 1. Accumulate Markdown Table Lines
         if stripped.startswith("|") and stripped.endswith("|"):
+            in_header_block = False  # The moment a table begins, the header block is over
             in_table = True
             table_buffer.append(stripped)
             continue
@@ -127,6 +128,7 @@ def build_docx_from_markdown(md_content: str) -> DocumentType:
             render_markdown_table(doc, table_buffer)
             table_buffer = []
             in_table = False
+            in_header_block = False
 
         if not stripped:
             continue
@@ -154,32 +156,36 @@ def build_docx_from_markdown(md_content: str) -> DocumentType:
             p.paragraph_format.space_after = Pt(3)
             if in_header_block:
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            else:
+                p.alignment = WD_ALIGN_PARAGRAPH.LEFT
             run = p.add_run(stripped[2:].strip())
             run.font.name = FONT_NAME
             run.font.size = Pt(13.5)
             run.font.color.rgb = BLACK_COLOR
             run.bold = True
 
-        # 4. Level 2 Heading (## Section)
+        # 4. Level 2 Heading (## Section / Subtitle)
         elif stripped.startswith("## "):
             p = doc.add_paragraph()
             p.paragraph_format.space_before = Pt(10)
             p.paragraph_format.space_after = Pt(3)
             if in_header_block:
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            else:
+                p.alignment = WD_ALIGN_PARAGRAPH.LEFT
             run = p.add_run(stripped[3:].strip())
             run.font.name = FONT_NAME
             run.font.size = Pt(12)
             run.font.color.rgb = BLACK_COLOR
             run.bold = True
 
-        # 5. Level 3 Heading (### Sub-section)
+        # 5. Level 3 Heading (### Sub-section / Clinical Domain) - Always LEFT aligned
         elif stripped.startswith("### "):
+            in_header_block = False  # Section heading reached, header block is over
             p = doc.add_paragraph()
             p.paragraph_format.space_before = Pt(8)
             p.paragraph_format.space_after = Pt(2)
-            if in_header_block:
-                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p.alignment = WD_ALIGN_PARAGRAPH.LEFT
             run = p.add_run(stripped[4:].strip())
             run.font.name = FONT_NAME
             run.font.size = Pt(11)
@@ -188,18 +194,22 @@ def build_docx_from_markdown(md_content: str) -> DocumentType:
 
         # 6. Bullet Points (* item, - item, • item)
         elif stripped.startswith(("- ", "* ", "• ")):
+            in_header_block = False
             content = re.sub(r"^[-*•]\s+", "", stripped)
             p = doc.add_paragraph(style="List Bullet")
             p.paragraph_format.space_before = Pt(1)
             p.paragraph_format.space_after = Pt(2)
+            p.alignment = WD_ALIGN_PARAGRAPH.LEFT
             apply_inline_formatting(p, content)
 
         # 7. Numbered Lists (1. item)
         elif re.match(r"^\d+\.\s+", stripped):
+            in_header_block = False
             content = re.sub(r"^\d+\.\s+", "", stripped)
             p = doc.add_paragraph(style="List Number")
             p.paragraph_format.space_before = Pt(1)
             p.paragraph_format.space_after = Pt(2)
+            p.alignment = WD_ALIGN_PARAGRAPH.LEFT
             apply_inline_formatting(p, content)
 
         # 8. Regular Body Paragraph
@@ -207,8 +217,12 @@ def build_docx_from_markdown(md_content: str) -> DocumentType:
             p = doc.add_paragraph()
             p.paragraph_format.space_before = Pt(1)
             p.paragraph_format.space_after = Pt(3)
-            if in_header_block:
+            # Only short sub-headers (like hospital address or phone) can be centered at the very top
+            if in_header_block and len(stripped) < 80 and not any(k in stripped.lower() for k in ("patient", "admission", "history", "diagnosis")):
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            else:
+                in_header_block = False
+                p.alignment = WD_ALIGN_PARAGRAPH.LEFT
             apply_inline_formatting(p, stripped)
 
     if in_table:
@@ -236,62 +250,80 @@ def parse_patient_metadata_from_md(md_content: str) -> dict:
         "date_of_discharge": "",
     }
 
+    def clean_val(raw: str) -> str:
+        val = raw.strip()
+        val = re.sub(r"^\*\*|\*\*$", "", val).strip()
+        # Drop placeholders like '[Not recorded]', '[to be filled]', '[Full Patient Name]'
+        if val.startswith("[") and val.endswith("]"):
+            return ""
+        return val
+
     # 1. Patient Name (Table or Key-Value)
-    match_name = re.search(r"\|\s*(?:\*\*)?Patient(?:'s)?\s*Name(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
+    match_name = re.search(r"\|\s*(?:\*\*)?Patient(?:'s)?(?:\s*Name)?\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
     if match_name:
-        meta["patient_name"] = match_name.group(1).strip()
+        meta["patient_name"] = clean_val(match_name.group(1))
     else:
         match_name_kv = re.search(r"(?:Patient(?:'s)?\s*Name|Name)\s*[:\-]\s*([^\n\r|*]+)", md_content, re.IGNORECASE)
         if match_name_kv:
-            meta["patient_name"] = match_name_kv.group(1).strip()
+            meta["patient_name"] = clean_val(match_name_kv.group(1))
 
-    # 2. Age / Sex
-    match_age_sex = re.search(r"\|\s*(?:\*\*)?Age\s*/\s*Sex(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
+    # 2. Age / Sex (Combined or Separate)
+    match_age_sex = re.search(r"\|\s*(?:\*\*)?Age\s*/\s*Sex\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
     if match_age_sex:
-        val = match_age_sex.group(1).strip()
+        val = clean_val(match_age_sex.group(1))
         parts = [p.strip() for p in val.split("/") if p.strip()]
         if len(parts) >= 1:
             meta["age"] = parts[0]
         if len(parts) >= 2:
             meta["sex"] = parts[1]
     else:
-        match_age = re.search(r"(?:Age|Age\s*in\s*years)\s*[:\-]\s*([0-9]+(?:\s*(?:years?|yrs?))?)", md_content, re.IGNORECASE)
-        if match_age:
-            meta["age"] = match_age.group(1).strip()
-        match_sex = re.search(r"(?:Sex|Gender)\s*[:\-]\s*([A-Za-z]+)", md_content, re.IGNORECASE)
-        if match_sex:
-            meta["sex"] = match_sex.group(1).strip()
+        # Separate row: | Age: | 74 Years |
+        match_age_row = re.search(r"\|\s*(?:\*\*)?Age\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
+        if match_age_row:
+            meta["age"] = clean_val(match_age_row.group(1))
+        else:
+            match_age = re.search(r"(?:Age|Age\s*in\s*years)\s*[:\-]\s*([0-9]+(?:\s*(?:years?|yrs?))?)", md_content, re.IGNORECASE)
+            if match_age:
+                meta["age"] = clean_val(match_age.group(1))
 
-    # 3. UHID
-    match_uhid = re.search(r"\|\s*(?:\*\*)?UHID(?:\s*No\.?)?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
-    if match_uhid:
-        meta["uhid_no"] = match_uhid.group(1).strip()
+        # Separate row: | Sex: | Male |
+        match_sex_row = re.search(r"\|\s*(?:\*\*)?(?:Sex|Gender)\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
+        if match_sex_row:
+            meta["sex"] = clean_val(match_sex_row.group(1))
+        else:
+            match_sex = re.search(r"(?:Sex|Gender)\s*[:\-]\s*([A-Za-z]+)", md_content, re.IGNORECASE)
+            if match_sex:
+                meta["sex"] = clean_val(match_sex.group(1))
+
+    # 3. UHID / IPD ID (Strict UHID prioritized over secondary IPD ID)
+    match_uhid_strict = re.search(r"\|\s*(?:\*\*)?UHID(?:\s*No\.?)?\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
+    if match_uhid_strict:
+        meta["uhid_no"] = clean_val(match_uhid_strict.group(1))
     else:
-        match_uhid_kv = re.search(r"(?:UHID|IPD\s*ID|CR\s*NO)\s*[:\-]\s*([^\n\r|*]+)", md_content, re.IGNORECASE)
-        if match_uhid_kv:
-            meta["uhid_no"] = match_uhid_kv.group(1).strip()
+        match_uhid_alt = re.search(r"\|\s*(?:\*\*)?(?:IPD\s*ID|CR\s*NO\.?)\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
+        if match_uhid_alt:
+            meta["uhid_no"] = clean_val(match_uhid_alt.group(1))
+        else:
+            match_uhid_kv = re.search(r"(?:UHID|IPD\s*ID|CR\s*NO)\s*[:\-]\s*([^\n\r|*]+)", md_content, re.IGNORECASE)
+            if match_uhid_kv:
+                meta["uhid_no"] = clean_val(match_uhid_kv.group(1))
 
     # 4. Date of Admission
-    match_doa = re.search(r"\|\s*(?:\*\*)?Date\s*of\s*Admission(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
+    match_doa = re.search(r"\|\s*(?:\*\*)?(?:Date\s*of\s*Admission|Admission\s*Date|DOA)\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
     if match_doa:
-        meta["date_of_admission"] = match_doa.group(1).strip()
+        meta["date_of_admission"] = clean_val(match_doa.group(1))
     else:
         match_doa_kv = re.search(r"(?:Date\s*of\s*Admission|DOA|Admission\s*Date)\s*[:\-]\s*([^\n\r|*]+)", md_content, re.IGNORECASE)
         if match_doa_kv:
-            meta["date_of_admission"] = match_doa_kv.group(1).strip()
+            meta["date_of_admission"] = clean_val(match_doa_kv.group(1))
 
     # 5. Date of Discharge
-    match_dod = re.search(r"\|\s*(?:\*\*)?Date\s*of\s*Discharge(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
+    match_dod = re.search(r"\|\s*(?:\*\*)?(?:Date\s*of\s*Discharge|Discharge\s*Date|DOD)\s*:?(?:\*\*)?\s*\|\s*([^|\n]+)\|", md_content, re.IGNORECASE)
     if match_dod:
-        meta["date_of_discharge"] = match_dod.group(1).strip()
+        meta["date_of_discharge"] = clean_val(match_dod.group(1))
     else:
         match_dod_kv = re.search(r"(?:Date\s*of\s*Discharge|DOD|Discharge\s*Date)\s*[:\-]\s*([^\n\r|*]+)", md_content, re.IGNORECASE)
         if match_dod_kv:
-            meta["date_of_discharge"] = match_dod_kv.group(1).strip()
-
-    # Clean any placeholders like '[to be filled]' from patient_name
-    if meta["patient_name"].startswith("[") and meta["patient_name"].endswith("]"):
-        if "name" in meta["patient_name"].lower():
-            meta["patient_name"] = ""
+            meta["date_of_discharge"] = clean_val(match_dod_kv.group(1))
 
     return meta

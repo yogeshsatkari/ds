@@ -134,6 +134,8 @@ Your task is to generate a comprehensive, professional, and clinically accurate 
 7. **TEMPLATE STRUCTURE COMPLIANCE**:
    - Adopt the EXACT section headers, tables, and organizational flow specified in the target template.
    - Replace all `[Placeholder ...]` slots with real patient data from the context, or the safe missing-data fallback above.
+   - Ensure the document title is cleanly `DISCHARGE SUMMARY` without draft markers (e.g. strip `(DRAFT - verification pending)`, `(DRAFT)`, or `PROVISIONAL`).
+   - Never output duplicate hospital name headers.
 
 8. **NO IMAGE OR LOGO SYNTAX**:
    - Do NOT output image tags, logo placeholders, or markdown image syntax (such as `![Hospital Logo]` or `![Logo]`). Focus strictly on clean textual headers, tables, and narrative content.

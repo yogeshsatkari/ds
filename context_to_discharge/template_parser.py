@@ -147,9 +147,14 @@ def _table_to_markdown(table: Table) -> str:
 DOCX_TEMPLATE_TRANSFORMATION_PROMPT = """You are analyzing an extracted hospital discharge summary template/sample originally parsed from a DOCX document.
 Transform this document into a standardized, reusable discharge summary template by replacing patient-specific variable values with INFORMATIVE, DESCRIPTIVE PLACEHOLDERS while strictly preserving its visual layout, headers, and section hierarchy:
 
-1. **Headers & Branding**: Keep hospital name, institutional branding text, and department headings verbatim. Do NOT include image tags, logo placeholders, or markdown image syntax (such as `![Hospital Logo]` or `![Logo]`). Focus purely on textual branding.
+1. **Headers & Branding**: 
+   - Capture official hospital name, institutional address, contact phone/helpline, website, accreditation badges (e.g. NABH/JCI), and department headings verbatim. Focus purely on clean textual branding (do NOT include image tags, logo placeholders, or markdown image syntax such as `![Hospital Logo]` or `![Logo]`).
+   - **Deduplication**: If the letterhead contains bilingual repetitions (e.g. state language/Hindi + English) or repeats the institution name as a logo sub-caption, output the clean English hospital name once. Never output identical duplicate hospital name lines.
+   - **Document Title Normalization**: Hospital samples often include transient administrative stamps, diagonal watermarks, or draft disclaimers (e.g. `(DRAFT - verification pending)`, `(DRAFT)`, `PROVISIONAL`, `DUPLICATE`, `COPY`). Strip all such transient status labels and watermarks. The document title heading must always be standardized cleanly as `## DISCHARGE SUMMARY` (or specific department discharge title).
 2. **Headings**: Preserve all section headings (##, ###).
-3. **Tables**: Preserve all markdown tables (| Col 1 | Col 2 |) with exact columns and minimal separators (| --- | --- |).
+3. **Tables & Header Boundary**: 
+   - Preserve all markdown tables (| Col 1 | Col 2 |) with exact columns and minimal separators (| --- | --- |).
+   - Place a horizontal divider rule (`---`) immediately following the demographics table / header block, cleanly separating the institutional header from the clinical sections.
 4. **Short Metadata Fields**: Replace patient demographics with semantic placeholders:
    - e.g. `| Patient's Name: | [Full Patient Name] | IPD ID: | [Inpatient ID / Registration No.] |`
    - e.g. `| Age / Sex: | [Age in years / Gender] | Admission Date: | [DD/MM/YYYY HH:MM] |`
@@ -167,6 +172,7 @@ Transform this document into a standardized, reusable discharge summary template
    - Discharge / Follow-up: `[Discharge medications with explicit Dosage, Route, Frequency, Duration, and Food timing; followed by specific home care/catheter directives, dietary and fluid restrictions]`
 8. **Static Boilerplate**: Keep hospital warning instructions, emergency return signs, and standard advisories verbatim as they appear.
 9. **No Repetition Loops**: Do NOT output runaway repeating characters, dashes, or words.
+10. **Ignore Printout Artifacts**: Ignore physical print artifacts, diagonal background watermarks, barcode numbers, page counters ('Page 1 of 2'), and printer audit timestamps that belong to the sample printout rather than the reusable hospital format.
 
 Output ONLY the clean Markdown template. Do NOT wrap output in ```markdown code blocks.
 """
@@ -243,9 +249,14 @@ def docx_to_template_markdown(docx_bytes: bytes, ai_abstraction: bool = True) ->
 TEMPLATE_STRUCTURAL_EXTRACTION_PROMPT = """You are analyzing a target hospital discharge summary template/sample.
 Transcribe its EXACT visual layout, structural hierarchy, and sections into clean Markdown, replacing patient-specific variable values with INFORMATIVE, DESCRIPTIVE PLACEHOLDERS:
 
-1. **Headers & Branding**: Capture hospital name, institutional branding text, and department headings verbatim. Do NOT include image tags, logo placeholders, or markdown image syntax (such as `![Hospital Logo]` or `![Logo]`). Focus purely on textual branding.
+1. **Headers & Branding**: 
+   - Capture official hospital name, institutional address, contact phone/helpline, website, accreditation badges (e.g. NABH/JCI), and department headings verbatim. Focus purely on clean textual branding (do NOT include image tags, logo placeholders, or markdown image syntax such as `![Hospital Logo]` or `![Logo]`).
+   - **Deduplication**: If the letterhead contains bilingual repetitions (e.g. state language/Hindi + English) or repeats the institution name as a logo sub-caption, output the clean English hospital name once. Never output identical duplicate hospital name lines.
+   - **Document Title Normalization**: Hospital samples often include transient administrative stamps, diagonal watermarks, or draft disclaimers (e.g. `(DRAFT - verification pending)`, `(DRAFT)`, `PROVISIONAL`, `DUPLICATE`, `COPY`). Strip all such transient status labels and watermarks. The document title heading must always be standardized cleanly as `## DISCHARGE SUMMARY` (or specific department discharge title).
 2. **Headings**: Structure section titles as Markdown headings (##, ###).
-3. **Tables**: Preserve all tables exactly using clean Markdown table syntax (| Col 1 | Col 2 |). The separator row MUST contain exactly three hyphens per column: `| --- | --- |`. Never output more than three hyphens in a cell.
+3. **Tables & Header Boundary**: 
+   - Preserve all tables exactly using clean Markdown table syntax (| Col 1 | Col 2 |). The separator row MUST contain exactly three hyphens per column: `| --- | --- |`. Never output more than three hyphens in a cell.
+   - Place a horizontal divider rule (`---`) immediately following the demographics table / header block, cleanly separating the institutional header from the clinical sections.
 4. **Short Metadata Fields**: Use clear semantic placeholders with expected format:
    - e.g. `| Patient's Name: | [Full Patient Name] | IPD ID: | [Inpatient ID / Registration No.] |`
    - e.g. `| Age / Sex: | [Age in years / Gender] | Admission Date: | [DD/MM/YYYY HH:MM] |`
@@ -263,6 +274,7 @@ Transcribe its EXACT visual layout, structural hierarchy, and sections into clea
    - Discharge / Follow-up: `[Discharge medications with explicit Dosage, Route, Frequency, Duration, and Food timing; followed by specific home care/catheter directives, dietary and fluid restrictions]`
 8. **Static Boilerplate**: Keep hospital warning instructions, emergency return signs, and standard advisories verbatim as they appear.
 9. **No Repetition Loops**: Do NOT output runaway repeating characters (such as hyphens, dashes, underscores, spaces, or words).
+10. **Ignore Printout Artifacts**: Ignore physical print artifacts, diagonal background watermarks, barcode numbers, page counters ('Page 1 of 2'), and printer audit timestamps that belong to the sample printout rather than the reusable hospital format.
 
 Output ONLY the structured Markdown template. Do NOT wrap output in ```markdown code blocks.
 """
