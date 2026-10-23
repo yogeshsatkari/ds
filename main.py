@@ -1,19 +1,42 @@
+import io
+import mimetypes
+import os
+from pathlib import Path
+import shutil
+import subprocess
+from typing import Optional
+import uuid
+import zipfile
+
+from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
-import subprocess
-import shutil
-import os
-import uuid
-from pathlib import Path
-from typing import Optional
+from pydantic import BaseModel
 
-from dotenv import load_dotenv
-
-import gemini_service
-import r2_storage
 from context_to_discharge.render import parse_patient_metadata_from_md
+from context_to_discharge.template_parser import parse_template_to_markdown
+import gemini_service
 from pipeline.extraction_pipeline import run_extraction_pipeline, ExtractionPipelineError
+import r2_storage
+
+
+class DoctorMetadataRequest(BaseModel):
+    phone: str
+    pin: str
+
+
+ALLOWED_TEMPLATE_EXTENSIONS = {
+    ".docx",
+    ".pdf",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
+    ".tiff",
+    ".tif",
+    ".bmp",
+}
 
 
 load_dotenv()
@@ -45,6 +68,9 @@ def parse_uuid(value: str, field_name: str) -> str:
     try:
         return str(uuid.UUID(value))
     except ValueError as exc:
+        safe = "".join(c for c in value if c.isalnum() or c in "-_")
+        if len(safe) >= 4 and safe == value:
+            return safe
         raise HTTPException(status_code=400, detail=f"Invalid {field_name}.") from exc
 
 
@@ -119,6 +145,12 @@ def root():
         "<ul>"
         "<li><code>POST /extract</code> — upload images, returns filled discharge summary DOCX</li>"
         "<li><code>GET /users/{user_id}/patients</code> — list past patients for a user</li>"
+        "<li><code>GET /users/{user_id}/metadata</code> — fetch doctor profile metadata (phone, pin, timestamps)</li>"
+        "<li><code>POST /users/{user_id}/metadata</code> — save/sync doctor profile metadata (phone, pin)</li>"
+        "<li><code>GET /users/{user_id}/template</code> — fetch doctor profile template metadata</li>"
+        "<li><code>POST /users/{user_id}/template</code> — upload and pre-parse doctor profile template</li>"
+        "<li><code>DELETE /users/{user_id}/template</code> — remove doctor profile template</li>"
+        "<li><code>GET /users/{user_id}/template/file</code> — download doctor profile template file(s)</li>"
         "<li><code>GET /extractions/{user_id}/{patient_id}/context.md</code> — fetch stored raw OCR markdown</li>"
         "<li><code>GET /extractions/{user_id}/{patient_id}/discharge-summary.md</code> — fetch stored standard markdown</li>"
         "<li><code>GET /extractions/{user_id}/{patient_id}/template.md</code> — fetch stored template markdown (if custom template provided)</li>"
@@ -157,6 +189,149 @@ def list_patients(user_id: str):
     client = r2_storage.r2_client()
     patients = r2_storage.list_user_patients(client, user_id)
     return {"user_id": user_id, "patients": patients}
+
+
+@app.get("/users/{user_id}/template")
+def get_user_template(user_id: str):
+    require_r2()
+    user_id = parse_uuid(user_id, "user_id")
+
+    client = r2_storage.r2_client()
+    meta = r2_storage.get_user_template_meta(client, user_id)
+    if not meta:
+        return {"mode": "standard"}
+    return meta
+
+
+@app.post("/users/{user_id}/template")
+async def save_user_template(
+    user_id: str,
+    template_files: list[UploadFile] = File(...),
+):
+    require_r2()
+    require_gemini()
+    user_id = parse_uuid(user_id, "user_id")
+
+    if not template_files:
+        raise HTTPException(status_code=400, detail="At least one template file is required.")
+
+    template_items: list[tuple[str, bytes]] = []
+    primary_filename = ""
+
+    for index, upload in enumerate(template_files, start=1):
+        filename = (upload.filename or f"template-{index:03d}").strip()
+        ext = os.path.splitext(filename)[1].lower()
+        if ext not in ALLOWED_TEMPLATE_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file format '{ext}' in '{filename}'. Allowed formats: .docx, .pdf, or images (.jpg, .jpeg, .png, .webp, .tiff).",
+            )
+        content = await upload.read()
+        if not content:
+            raise HTTPException(status_code=400, detail=f"Empty uploaded file: {filename}")
+        template_items.append((filename, content))
+        if not primary_filename:
+            primary_filename = filename
+
+    if not template_items:
+        raise HTTPException(status_code=400, detail="No readable template content found in upload.")
+
+    # Pre-parse the template to Markdown structure across user profile
+    try:
+        template_md, _ = parse_template_to_markdown(template_items)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to parse template: {exc}",
+        ) from exc
+
+    client = r2_storage.r2_client()
+    r2_storage.put_user_template(
+        client=client,
+        user_id=user_id,
+        template_items=template_items,
+        filename=primary_filename,
+        template_md=template_md,
+    )
+
+    return {
+        "status": "ok",
+        "mode": "custom",
+        "filename": primary_filename,
+        "file_count": len(template_items),
+    }
+
+
+@app.delete("/users/{user_id}/template")
+def remove_user_template(user_id: str):
+    require_r2()
+    user_id = parse_uuid(user_id, "user_id")
+
+    client = r2_storage.r2_client()
+    r2_storage.delete_user_template(client, user_id)
+    return {"status": "ok", "mode": "standard"}
+
+
+@app.get("/users/{user_id}/template/file")
+def download_user_template_file(user_id: str):
+    require_r2()
+    user_id = parse_uuid(user_id, "user_id")
+
+    client = r2_storage.r2_client()
+    meta = r2_storage.get_user_template_meta(client, user_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Template not found.")
+
+    files = r2_storage.get_user_template_files(client, user_id)
+    if not files:
+        raise HTTPException(status_code=404, detail="Template files not found.")
+
+    if len(files) == 1:
+        fname, fbytes = files[0]
+        content_type = mimetypes.guess_type(fname)[0] or "application/octet-stream"
+        return Response(
+            content=fbytes,
+            media_type=content_type,
+            headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+        )
+
+    # Multi-file template: package into a zip archive
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fname, fbytes in files:
+            zf.writestr(fname, fbytes)
+    base_name = os.path.splitext(meta.get("filename") or "template")[0]
+    zip_filename = f"{base_name}_template.zip"
+    return Response(
+        content=zip_buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{zip_filename}"'},
+    )
+
+
+@app.post("/users/{user_id}/metadata")
+async def update_doctor_metadata(user_id: str, req: DoctorMetadataRequest):
+    require_r2()
+    user_id = parse_uuid(user_id, "user_id")
+
+    clean_phone = "".join(c for c in req.phone if c.isdigit())[-10:] if req.phone else ""
+    clean_pin = req.pin.strip() if req.pin else ""
+
+    client = r2_storage.r2_client()
+    data = r2_storage.save_user_metadata(client, user_id, clean_phone, clean_pin)
+    return {"status": "ok", "metadata": data}
+
+
+@app.get("/users/{user_id}/metadata")
+async def fetch_doctor_metadata(user_id: str):
+    require_r2()
+    user_id = parse_uuid(user_id, "user_id")
+
+    client = r2_storage.r2_client()
+    data = r2_storage.get_user_metadata(client, user_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Doctor metadata not found.")
+    return data
 
 
 @app.get("/extractions/{user_id}/{patient_id}/context.md")
@@ -315,7 +490,7 @@ async def extract_images(
     files: list[UploadFile] = File(...),
     template_files: list[UploadFile] = File(default=[]),
     patient_id: Optional[str] = Form(None),
-    discharge_type: str = Form("standard"),
+    discharge_type: Optional[str] = Form(None),
 ):
     require_r2()
     require_gemini()
@@ -349,22 +524,40 @@ async def extract_images(
         if not image_items:
             raise HTTPException(status_code=400, detail="No readable pages or images found in upload.")
 
-        # Ingest doctor-provided template files (if any)
+        # Ingest doctor-provided template files (if any) or load persistent profile template
         template_items: list[tuple[str, bytes]] = []
+        preparsed_template_md: Optional[str] = None
+        client = r2_storage.r2_client()
+
         if template_files:
             for index, upload in enumerate(template_files, start=1):
                 t_filename = upload.filename or f"template-{index:03d}"
                 t_content = await upload.read()
                 if t_content:
                     template_items.append((t_filename, t_content))
+            effective_discharge_type = "custom"
+        elif discharge_type and discharge_type.strip().lower() in ("standard", "force_standard"):
+            # Doctor explicitly requested institutional standard format
+            effective_discharge_type = "standard"
+        else:
+            # Check if doctor has a stored custom template in R2
+            profile_meta = r2_storage.get_user_template_meta(client, user_id)
+            if profile_meta and profile_meta.get("mode") == "custom":
+                # Prefer pre-parsed template.md to avoid re-parsing latency and API token spend
+                preparsed_template_md = r2_storage.get_user_template_md(client, user_id)
+                if not preparsed_template_md:
+                    template_items = r2_storage.get_user_template_files(client, user_id)
+                effective_discharge_type = "custom"
+            else:
+                effective_discharge_type = discharge_type or "standard"
 
         result = run_extraction_pipeline(
             image_items=image_items,
             template_items=template_items or None,
-            discharge_type=discharge_type,
+            discharge_type=effective_discharge_type,
+            preparsed_template_md=preparsed_template_md,
         )
 
-        client = r2_storage.r2_client()
         md_key = r2_storage.extraction_key(user_id, patient_id)
         docx_key = r2_storage.discharge_summary_docx_key(user_id, patient_id)
         meta_key = r2_storage.patient_metadata_key(user_id, patient_id)

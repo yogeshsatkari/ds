@@ -1,4 +1,6 @@
+from datetime import datetime, timezone
 import json
+import mimetypes
 import os
 from typing import Optional
 
@@ -61,6 +63,26 @@ def extraction_metrics_key(user_id: str, patient_id: str) -> str:
 
 def template_md_key(user_id: str, patient_id: str) -> str:
     return f"{extraction_prefix(user_id, patient_id)}/template.md"
+
+
+def user_template_prefix(user_id: str) -> str:
+    return f"users/{user_id}/template/"
+
+
+def user_template_meta_key(user_id: str) -> str:
+    return f"users/{user_id}/template/meta.json"
+
+
+def user_template_files_prefix(user_id: str) -> str:
+    return f"users/{user_id}/template/files/"
+
+
+def user_template_md_key(user_id: str) -> str:
+    return f"users/{user_id}/template/template.md"
+
+
+def user_metadata_key(user_id: str) -> str:
+    return f"users/{user_id}/metadata.json"
 
 
 def user_patients_prefix(user_id: str) -> str:
@@ -283,3 +305,120 @@ def get_bytes(client, key: str) -> tuple[bytes, Optional[str]]:
         raise
     content_type = obj.get("ContentType")
     return obj["Body"].read(), content_type
+
+
+def delete_prefix_objects(client, prefix: str) -> None:
+    paginator = client.get_paginator("list_objects_v2")
+    objects_to_delete: list[dict] = []
+    for page in paginator.paginate(Bucket=bucket(), Prefix=prefix):
+        for obj in page.get("Contents", []):
+            objects_to_delete.append({"Key": obj["Key"]})
+            if len(objects_to_delete) >= 1000:
+                client.delete_objects(
+                    Bucket=bucket(),
+                    Delete={"Objects": objects_to_delete, "Quiet": True},
+                )
+                objects_to_delete = []
+    if objects_to_delete:
+        client.delete_objects(
+            Bucket=bucket(),
+            Delete={"Objects": objects_to_delete, "Quiet": True},
+        )
+
+
+def delete_user_template(client, user_id: str) -> None:
+    delete_prefix_objects(client, user_template_prefix(user_id))
+
+
+def put_user_template(
+    client,
+    user_id: str,
+    template_items: list[tuple[str, bytes]],
+    filename: str,
+    template_md: Optional[str] = None,
+) -> None:
+    # 1. Clear any previous files under users/{user_id}/template/files/
+    delete_prefix_objects(client, user_template_files_prefix(user_id))
+
+    # 2. Upload each file under users/{user_id}/template/files/{item_filename}
+    files_prefix = user_template_files_prefix(user_id)
+    for item_filename, item_bytes in template_items:
+        safe_filename = os.path.basename(item_filename).strip() or "template_file"
+        file_key = f"{files_prefix}{safe_filename}"
+        mime, _ = mimetypes.guess_type(safe_filename)
+        content_type = mime or "application/octet-stream"
+        put_bytes(client, file_key, item_bytes, content_type=content_type)
+
+    # 3. Store template.md if pre-parsed
+    if template_md:
+        put_text(client, user_template_md_key(user_id), template_md)
+
+    # 4. Save meta.json
+    now_iso = datetime.now(timezone.utc).isoformat()
+    meta = {
+        "mode": "custom",
+        "filename": filename,
+        "file_count": len(template_items),
+        "updated_at": now_iso,
+    }
+    put_json(client, user_template_meta_key(user_id), meta)
+
+
+def get_user_template_meta(client, user_id: str) -> Optional[dict]:
+    try:
+        return get_json(client, user_template_meta_key(user_id))
+    except FileNotFoundError:
+        return None
+
+
+def get_user_template_md(client, user_id: str) -> Optional[str]:
+    try:
+        return get_text(client, user_template_md_key(user_id))
+    except FileNotFoundError:
+        return None
+
+
+def get_user_template_files(client, user_id: str) -> list[tuple[str, bytes]]:
+    prefix = user_template_files_prefix(user_id)
+    paginator = client.get_paginator("list_objects_v2")
+    items: list[tuple[str, bytes]] = []
+    for page in paginator.paginate(Bucket=bucket(), Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            filename = key[len(prefix) :]
+            if filename:
+                try:
+                    data, _ = get_bytes(client, key)
+                    items.append((filename, data))
+                except FileNotFoundError:
+                    continue
+    items.sort(key=lambda x: x[0])
+    return items
+
+
+def save_user_metadata(client, user_id: str, phone: str, pin: str) -> dict:
+    now = datetime.now(timezone.utc).isoformat()
+    key = user_metadata_key(user_id)
+
+    # Check if metadata already exists to preserve created_at
+    existing = get_user_metadata(client, user_id)
+    created_at = existing.get("created_at", now) if existing else now
+    data = {
+        "user_id": user_id,
+        "phone": phone,
+        "pin": pin,
+        "created_at": created_at,
+        "last_login": now,
+    }
+
+    put_json(client, key, data)
+    return data
+
+
+def get_user_metadata(client, user_id: str) -> Optional[dict]:
+    key = user_metadata_key(user_id)
+    try:
+        return get_json(client, key)
+    except FileNotFoundError:
+        return None
+

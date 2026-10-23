@@ -39,9 +39,11 @@ def run_extraction_pipeline(
     image_items: list[tuple[str, bytes]],
     template_items: Optional[list[tuple[str, bytes]]] = None,
     discharge_type: str = "standard",
+    preparsed_template_md: Optional[str] = None,
 ) -> ExtractionResult:
     """
     Executes clinical OCR and synthesizes a discharge summary DOCX.
+    - If preparsed_template_md is provided: uses pre-parsed doctor profile template Markdown.
     - If template_items is provided: extracts the custom template into Markdown and guides synthesis.
     - If template_items is empty/None: uses the institutional standardized discharge template.
     """
@@ -73,7 +75,19 @@ def run_extraction_pipeline(
     template_md: Optional[str] = None
     template_metrics: Optional[dict] = None
 
-    if template_items:
+    if preparsed_template_md:
+        template_md = preparsed_template_md
+        discharge_type_norm = "custom"
+        template_metrics = {
+            "format": "Pre-parsed Doctor Profile Template",
+            "method": "R2 Cached Markdown",
+            "status": "reused",
+            "duration_seconds": 0.0,
+            "total_tokens": 0,
+            "cost_usd": 0.0,
+            "cost_inr": 0.0,
+        }
+    elif template_items:
         try:
             template_md, template_metrics = parse_template_to_markdown(template_items)
             discharge_type_norm = "custom"
