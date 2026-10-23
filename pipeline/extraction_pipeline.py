@@ -40,6 +40,7 @@ def run_extraction_pipeline(
     template_items: Optional[list[tuple[str, bytes]]] = None,
     discharge_type: str = "standard",
     preparsed_template_md: Optional[str] = None,
+    template_name: Optional[str] = None,
 ) -> ExtractionResult:
     """
     Executes clinical OCR and synthesizes a discharge summary DOCX.
@@ -113,6 +114,9 @@ def run_extraction_pipeline(
             meta = {}
         patient_name = (meta.get("patient_name") or "").strip()
 
+        resolved_template_name = template_name or (
+            "Institutional Standard" if discharge_type_norm == "standard" else "Custom Template"
+        )
         metadata = {
             "patient_name": patient_name,
             "age": str(meta.get("age") or "").strip(),
@@ -121,6 +125,7 @@ def run_extraction_pipeline(
             "date_of_admission": str(meta.get("date_of_admission") or "").strip(),
             "date_of_discharge": str(meta.get("date_of_discharge") or "").strip(),
             "discharge_type": discharge_type_norm,
+            "template_name": resolved_template_name,
         }
     except Exception as stage2_exc:
         pipeline_duration = time.time() - pipeline_start

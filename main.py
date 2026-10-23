@@ -527,6 +527,8 @@ async def extract_images(
         # Ingest doctor-provided template files (if any) or load persistent profile template
         template_items: list[tuple[str, bytes]] = []
         preparsed_template_md: Optional[str] = None
+        template_name: Optional[str] = None
+        is_one_off_template: bool = False
         client = r2_storage.r2_client()
 
         if template_files:
@@ -536,9 +538,13 @@ async def extract_images(
                 if t_content:
                     template_items.append((t_filename, t_content))
             effective_discharge_type = "custom"
+            is_one_off_template = True
+            if template_items:
+                template_name = template_items[0][0]
         elif discharge_type and discharge_type.strip().lower() in ("standard", "force_standard"):
             # Doctor explicitly requested institutional standard format
             effective_discharge_type = "standard"
+            template_name = "Institutional Standard"
         else:
             # Check if doctor has a stored custom template in R2
             profile_meta = r2_storage.get_user_template_meta(client, user_id)
@@ -548,14 +554,17 @@ async def extract_images(
                 if not preparsed_template_md:
                     template_items = r2_storage.get_user_template_files(client, user_id)
                 effective_discharge_type = "custom"
+                template_name = profile_meta.get("filename") or "Doctor Profile Template"
             else:
                 effective_discharge_type = discharge_type or "standard"
+                template_name = "Institutional Standard"
 
         result = run_extraction_pipeline(
             image_items=image_items,
             template_items=template_items or None,
             discharge_type=effective_discharge_type,
             preparsed_template_md=preparsed_template_md,
+            template_name=template_name,
         )
 
         md_key = r2_storage.extraction_key(user_id, patient_id)
@@ -574,6 +583,14 @@ async def extract_images(
         if result.template_md:
             template_key = r2_storage.template_md_key(user_id, patient_id)
             r2_storage.put_text(client, template_key, result.template_md)
+
+        # 3b. For one-off templates uploaded specifically for this patient, also preserve raw file(s)
+        if is_one_off_template and template_items:
+            for item_filename, item_bytes in template_items:
+                safe_name = os.path.basename(item_filename).strip() or "template_file"
+                one_off_key = f"{r2_storage.extraction_prefix(user_id, patient_id)}/template_files/{safe_name}"
+                mime, _ = mimetypes.guess_type(safe_name)
+                r2_storage.put_bytes(client, one_off_key, item_bytes, content_type=mime or "application/octet-stream")
 
         # 4. Store unified metadata.json for fast dashboard indexing
         if result.metadata:

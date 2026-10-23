@@ -155,6 +155,8 @@ def build_patient_list_item(client, user_id: str, patient_id: str) -> Optional[d
             item[field] = str(meta.get(field, "") or "").strip()
         if "discharge_type" in meta:
             item["discharge_type"] = meta["discharge_type"]
+        if "template_name" in meta:
+            item["template_name"] = meta["template_name"]
         return item
     except FileNotFoundError:
         pass
