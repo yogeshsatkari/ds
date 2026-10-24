@@ -1,3 +1,4 @@
+import asyncio
 import io
 import mimetypes
 import os
@@ -559,7 +560,8 @@ async def extract_images(
                 effective_discharge_type = discharge_type or "standard"
                 template_name = "Institutional Standard"
 
-        result = run_extraction_pipeline(
+        result = await asyncio.to_thread(
+            run_extraction_pipeline,
             image_items=image_items,
             template_items=template_items or None,
             discharge_type=effective_discharge_type,
