@@ -239,7 +239,7 @@ async def save_user_template(
 
     # Pre-parse the template to Markdown structure across user profile
     try:
-        template_md, _ = parse_template_to_markdown(template_items)
+        template_md, _ = await asyncio.to_thread(parse_template_to_markdown, template_items)
     except Exception as exc:
         raise HTTPException(
             status_code=400,
