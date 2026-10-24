@@ -140,6 +140,13 @@ Your task is to generate a comprehensive, professional, and clinically accurate 
 8. **NO IMAGE OR LOGO SYNTAX**:
    - Do NOT output image tags, logo placeholders, or markdown image syntax (such as `![Hospital Logo]` or `![Logo]`). Focus strictly on clean textual headers, tables, and narrative content.
 
+9. **HOSPITAL NAME & ADDRESS (FROM CONTEXT)**:
+   - Extract the official hospital or clinic name where the patient was admitted from the clinical context (`context.md`) and output it as the top Level 1 Heading: `# <HOSPITAL NAME>` (in ALL CAPS, e.g. `# COMBINED MEDICAL INSTITUTE` or `# MAX SUPER SPECIALITY HOSPITAL`).
+   - If the template has `# [Hospital Name]` (or an older sample hospital name), replace it with the actual facility name from the patient context.
+   - **HOSPITAL ADDRESS RULE (CRITICAL)**:
+     * If the patient clinical context (`context.md`) contains the genuine street address of the hospital, output it on the line immediately below `# <HOSPITAL NAME>`.
+     * If the clinical context does NOT document the hospital address: DO NOT output any address line, DO NOT output any placeholder (such as `[Hospital Address]`, `[Not recorded]`, or `N/A`), and DO NOT leave any blank line or empty space. Transition immediately from `# <HOSPITAL NAME>` directly to `## DISCHARGE SUMMARY`.
+
 Output ONLY the completed Markdown discharge summary. Do NOT wrap output in ```markdown code blocks.
 """
 

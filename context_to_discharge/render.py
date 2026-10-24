@@ -67,32 +67,50 @@ def render_markdown_table(doc: DocumentType, table_lines: list[str]):
     table.style = "Table Grid"
     table.autofit = True
 
-    is_four_col_demographics = (num_cols == 4)
+    flat_table_text = " ".join(" ".join(r) for r in rows).lower()
+    is_demographics = any(kw in flat_table_text for kw in (
+        "patient", "uhid", "admission", "discharge", "doctor", "consultant", "age / sex", "address", "ipd"
+    ))
 
     for r_idx, row in enumerate(rows):
-        for c_idx, cell_value in enumerate(row):
-            if c_idx < num_cols:
-                cell = table.cell(r_idx, c_idx)
-                cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-                apply_cell_padding(cell, top=100, bottom=100, left=130, right=130)
+        padded_row = row + [""] * (num_cols - len(row))
 
-                p = cell.paragraphs[0]
-                p.paragraph_format.space_after = Pt(0)
-                p.paragraph_format.space_before = Pt(0)
+        for c_idx in range(num_cols):
+            cell_value = padded_row[c_idx]
+            cell = table.cell(r_idx, c_idx)
+            cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+            apply_cell_padding(cell, top=100, bottom=100, left=130, right=130)
 
-                # Header row styling or 4-column key columns styling
-                if r_idx == 0:
-                    shading_elm = parse_xml(r'<w:shd {} w:fill="F2F4F7"/>'.format(nsdecls('w')))
-                    cell._tc.get_or_add_tcPr().append(shading_elm)
-                    apply_inline_formatting(p, cell_value, default_size_pt=10.5)
-                    for r in p.runs:
-                        r.bold = True
-                elif is_four_col_demographics and c_idx in (0, 2):
+            p = cell.paragraphs[0]
+            p.paragraph_format.space_after = Pt(0)
+            p.paragraph_format.space_before = Pt(0)
+
+            if is_demographics:
+                # In demographics table: even columns (0, 2, 4) are key labels, odd are values
+                if c_idx % 2 == 0 and cell_value.strip():
                     apply_inline_formatting(p, cell_value, default_size_pt=10)
                     for r in p.runs:
                         r.bold = True
                 else:
                     apply_inline_formatting(p, cell_value, default_size_pt=10)
+            elif r_idx == 0:
+                # Standard data table header row (e.g. Investigations / Lab panels)
+                shading_elm = parse_xml(r'<w:shd {} w:fill="F2F4F7"/>'.format(nsdecls('w')))
+                cell._tc.get_or_add_tcPr().append(shading_elm)
+                apply_inline_formatting(p, cell_value, default_size_pt=10.5)
+                for r in p.runs:
+                    r.bold = True
+            else:
+                apply_inline_formatting(p, cell_value, default_size_pt=10)
+
+        # Merge trailing empty cells for single key-value rows like Address: [Patient's Address] | | | | |
+        if is_demographics and num_cols > 2:
+            non_empty_indices = [i for i, v in enumerate(padded_row) if v.strip()]
+            if len(non_empty_indices) == 2 and non_empty_indices == [0, 1]:
+                try:
+                    table.cell(r_idx, 1).merge(table.cell(r_idx, num_cols - 1))
+                except Exception:
+                    pass
 
     # Add small spacing after table
     spacer = doc.add_paragraph()
@@ -227,6 +245,13 @@ def build_docx_from_markdown(md_content: str) -> DocumentType:
 
         # 8. Regular Paragraph (Address/Contact if in header block, else Left-aligned Clinical Body)
         else:
+            # If in header block and it's a placeholder, empty string, or missing value, drop completely with ZERO space
+            if in_header_block and (
+                not stripped
+                or re.search(r"\[.*(address|phone|hospital|not recorded|to be filled).*\]", stripped, re.IGNORECASE)
+                or stripped.lower() in ("none", "n/a", "not available", "not recorded", "_____")
+            ):
+                continue
             p = doc.add_paragraph()
             if in_header_block:
                 p.paragraph_format.space_before = Pt(1)

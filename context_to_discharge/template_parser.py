@@ -34,10 +34,17 @@ def normalize_template_masthead(md: str) -> str:
         if first_idx is None:
             return md
 
-        # Clean leading single-letter / symbol OCR logo artifacts on line 1 (e.g. 'vAll' -> 'All')
-        clean_line1 = re.sub(r"^[a-z\W_]+(?=[A-Z])", "", lines[first_idx].strip())
-        raw_title1 = re.sub(r"^[#\s*]+", "", clean_line1).strip()
-        raw_title1 = re.sub(r"[*]+$", "", raw_title1).strip()
+        raw_first = lines[first_idx].strip()
+        heading_stripped = re.sub(r"^[#\s*]+", "", raw_first).strip()
+        heading_stripped = re.sub(r"[*]+$", "", heading_stripped).strip()
+
+        # If it's a semantic placeholder like '[Hospital Name]', preserve it directly
+        if heading_stripped.startswith("[") and "]" in heading_stripped:
+            raw_title1 = heading_stripped
+        else:
+            # Clean leading single lowercase letter / symbol OCR logo artifacts (e.g. 'vAll' -> 'All')
+            clean_line1 = re.sub(r"^([a-z]|[^\w\s\[\]])+(?=[A-Z])", "", heading_stripped)
+            raw_title1 = clean_line1.strip()
 
         # Check next non-empty line
         second_idx = None
@@ -47,9 +54,15 @@ def normalize_template_masthead(md: str) -> str:
                 break
 
         if second_idx is not None:
-            clean_line2 = lines[second_idx].strip()
-            raw_title2 = re.sub(r"^[#\s*]+", "", clean_line2).strip()
-            raw_title2 = re.sub(r"[*]+$", "", raw_title2).strip()
+            raw_second = lines[second_idx].strip()
+            heading_stripped2 = re.sub(r"^[#\s*]+", "", raw_second).strip()
+            heading_stripped2 = re.sub(r"[*]+$", "", heading_stripped2).strip()
+
+            if heading_stripped2.startswith("[") and "]" in heading_stripped2:
+                raw_title2 = heading_stripped2
+            else:
+                clean_line2 = re.sub(r"^([a-z]|[^\w\s\[\]])+(?=[A-Z])", "", heading_stripped2)
+                raw_title2 = clean_line2.strip()
 
             # If line 2 is identical to line 1 (e.g. bilingual translation or logo subcaption), drop line 2
             if raw_title1 and raw_title2 and raw_title1.lower() == raw_title2.lower():
@@ -201,11 +214,14 @@ def _table_to_markdown(table: Table) -> str:
 DOCX_TEMPLATE_TRANSFORMATION_PROMPT = """You are analyzing an extracted hospital discharge summary template/sample originally parsed from a DOCX document.
 Transform this document into a standardized, reusable discharge summary template by replacing patient-specific variable values with INFORMATIVE, DESCRIPTIVE PLACEHOLDERS while strictly preserving its visual layout, headers, and section hierarchy:
 
-1. **Hospital Masthead & Branding (CRITICAL)**: 
-   - The official hospital name MUST be the very first line of the document, formatted as a Level 1 Heading: `# <Hospital Name>` (e.g. `# All India Institute of Medical Sciences Rishikesh`).
-   - **Deduplication**: Hospital letterheads often repeat the institution name (e.g. Hindi on line 1, English on line 2, or repeating under a logo). Strip any OCR logo artifacts (such as leading 'v', '✓', bullets, or icons). Output the clean English hospital name EXACTLY ONCE as `# <Hospital Name>`. Never output duplicate or bilingual repeated lines of the hospital name.
+1. **Hospital Masthead & Branding (CRITICAL - USE PLACEHOLDERS FOR REUSABILITY)**: 
+   - To make the template reusable across institutions and patients, do NOT hardcode a specific hospital's name or address.
+   - The very first line of the document MUST be the hospital name placeholder formatted as a Level 1 Heading: `# [Hospital Name]`.
+   - The institutional address must be represented as: `[Hospital Address]`.
+   - Do NOT include institution phone numbers, helpline numbers, or accreditation badges in the header. Only output `# [Hospital Name]` followed by `[Hospital Address]`.
+   - **Deduplication**: Hospital letterheads often repeat the institution name (e.g. Hindi on line 1, English on line 2, or repeating under a logo). Never output duplicate or bilingual repeated lines. Output the Level 1 Heading `# [Hospital Name]` EXACTLY ONCE.
    - **Document Title Normalization**: Hospital samples often include transient administrative stamps, diagonal watermarks, or draft disclaimers (e.g. `(DRAFT - verification pending)`, `(DRAFT)`, `PROVISIONAL`, `DUPLICATE`, `COPY`). Strip all such transient status labels and watermarks. The document title heading must always be standardized cleanly as `## DISCHARGE SUMMARY` (or specific department discharge title).
-   - Capture genuine institutional address, contact phone/helpline, website, accreditation badges (e.g. NABH/JCI), and department headings verbatim. Focus purely on clean textual branding (do NOT include image tags, logo placeholders, or markdown image syntax such as `![Hospital Logo]` or `![Logo]`).
+   - Focus purely on clean textual layout (do NOT include image tags, logo placeholders, or markdown image syntax such as `![Hospital Logo]` or `![Logo]`).
 2. **Headings**: Preserve all section headings (##, ###).
 3. **Tables & Header Boundary**: 
    - Preserve all markdown tables (| Col 1 | Col 2 |) with exact columns and minimal separators (| --- | --- |).
@@ -254,7 +270,7 @@ def multi_docx_to_template_markdown(
         return "", {"format": "DOCX", "duration_seconds": 0, "total_tokens": 0, "cost_usd": 0.0, "cost_inr": 0.0, "char_count": 0}
 
     # Check if raw_md is already an unfilled blank template (e.g. contains placeholders and lacks filled clinical text)
-    has_filled_data = len(combined_raw_md) > 300 and not any(blank in combined_raw_md for blank in ("_____", "[Full Patient Name]", "[Age in years]"))
+    has_filled_data = len(combined_raw_md) > 300 and not any(blank in combined_raw_md for blank in ("_____", "[Full Patient Name]", "[Age in years]", "[Hospital Name]"))
 
     if not ai_abstraction or not has_filled_data or not gemini_service.gemini_configured():
         duration = time.time() - start_time
@@ -437,11 +453,14 @@ Synthesize the visual branding, hospital letterhead, and layout shown in the att
 TEMPLATE_STRUCTURAL_EXTRACTION_PROMPT = """You are analyzing a target hospital discharge summary template/sample.
 Transcribe its EXACT visual layout, structural hierarchy, and sections into clean Markdown, replacing patient-specific variable values with INFORMATIVE, DESCRIPTIVE PLACEHOLDERS:
 
-1. **Hospital Masthead & Branding (CRITICAL)**: 
-   - The official hospital name MUST be the very first line of the document, formatted as a Level 1 Heading: `# <Hospital Name>` (e.g. `# All India Institute of Medical Sciences Rishikesh`).
-   - **Deduplication**: Hospital letterheads often repeat the institution name (e.g. Hindi on line 1, English on line 2, or repeating under a logo). Strip any OCR logo artifacts (such as leading 'v', '✓', bullets, or icons). Output the clean English hospital name EXACTLY ONCE as `# <Hospital Name>`. Never output duplicate or bilingual repeated lines of the hospital name.
+1. **Hospital Masthead & Branding (CRITICAL - USE PLACEHOLDERS FOR REUSABILITY)**: 
+   - To make the template reusable across institutions and patients, do NOT hardcode a specific hospital's name or address.
+   - The very first line of the document MUST be the hospital name placeholder formatted as a Level 1 Heading: `# [Hospital Name]`.
+   - The institutional address must be represented as: `[Hospital Address]`.
+   - Do NOT include institution phone numbers, helpline numbers, or accreditation badges in the header. Only output `# [Hospital Name]` followed by `[Hospital Address]`.
+   - **Deduplication**: Hospital letterheads often repeat the institution name (e.g. Hindi on line 1, English on line 2, or repeating under a logo). Never output duplicate or bilingual repeated lines. Output the Level 1 Heading `# [Hospital Name]` EXACTLY ONCE.
    - **Document Title Normalization**: Hospital samples often include transient administrative stamps, diagonal watermarks, or draft disclaimers (e.g. `(DRAFT - verification pending)`, `(DRAFT)`, `PROVISIONAL`, `DUPLICATE`, `COPY`). Strip all such transient status labels and watermarks. The document title heading must always be standardized cleanly as `## DISCHARGE SUMMARY` (or specific department discharge title).
-   - Capture genuine institutional address, contact phone/helpline, website, accreditation badges (e.g. NABH/JCI), and department headings verbatim. Focus purely on clean textual branding (do NOT include image tags, logo placeholders, or markdown image syntax such as `![Hospital Logo]` or `![Logo]`).
+   - Focus purely on clean textual layout (do NOT include image tags, logo placeholders, or markdown image syntax such as `![Hospital Logo]` or `![Logo]`).
 2. **Headings**: Structure section titles as Markdown headings (##, ###).
 3. **Tables & Header Boundary**: 
    - Preserve all tables exactly using clean Markdown table syntax (| Col 1 | Col 2 |). The separator row MUST contain exactly three hyphens per column: `| --- | --- |`. Never output more than three hyphens in a cell.
